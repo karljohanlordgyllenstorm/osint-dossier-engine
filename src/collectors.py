@@ -24,14 +24,13 @@ def classify_target(target: str) -> dict:
 
 def get_dns_records(domain: str) -> dict:
   records = {}
-  for rtype in ["A", "AAAA", "MX", "NS", "TXT"]:
+  for rtype in ["A", "AAAA", "MX", "NS", "TXT", "CAA"]:
     try:
       answers = dns.resolver.resolve(domain, rtype, lifetime=5)
       records[rtype] = [r.to_text().strip('"') for r in answers]
     except Exception:
       records[rtype] = []
 
-  # Kontrollera DMARC
   try:
     dmarc = dns.resolver.resolve(f"_dmarc.{domain}", "TXT", lifetime=5)
     records["DMARC"] = [r.to_text().strip('"') for r in dmarc]
@@ -49,6 +48,8 @@ def get_whois_info(domain: str) -> dict:
             "registrar": w.registrar,
             "creation_date": str(w.creation_date),
             "expiration_date": str(w.expiration_date),
+            "updated_date": str(w.updated_date),
+            "name_servers": w.name_servers,
             "org": w.org,
             "country": w.country,
         },
@@ -63,16 +64,90 @@ def get_ssl_info(domain: str) -> dict:
     with socket.create_connection((domain, 443), timeout=5) as sock:
       with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
         cert = ssock.getpeercert()
+        san = [x[1] for x in cert.get("subjectAltName", [])]
         return {
             "source": "ssl",
             "data": {
                 "issuer": dict(x[0] for x in cert.get("issuer", [])),
+                "subject": dict(x[0] for x in cert.get("subject", [])),
                 "notAfter": cert.get("notAfter"),
                 "notBefore": cert.get("notBefore"),
+                "alt_names": san[:25],
             },
         }
   except Exception as e:
     return {"source": "ssl", "error": str(e), "data": {}}
+
+
+async def fetch_http_security_and_tech(
+    session: aiohttp.ClientSession, domain: str
+) -> dict:
+  url = f"https://{domain}"
+  sec_headers = [
+      "Strict-Transport-Security",
+      "Content-Security-Policy",
+      "X-Frame-Options",
+      "X-Content-Type-Options",
+      "Referrer-Policy",
+      "Permissions-Policy",
+  ]
+  try:
+    async with session.get(url, timeout=10, allow_redirects=True) as resp:
+      headers = dict(resp.headers)
+      html = await resp.text(errors="ignore")
+
+      present = {h: headers.get(h) for h in sec_headers if h in headers}
+      missing = [h for h in sec_headers if h not in headers]
+
+      # Enkel teknik- och plattformsidentifiering
+      tech = []
+      html_lower = html.lower()
+      server = headers.get("Server", "")
+      if server:
+        tech.append(f"Server: {server}")
+      if "x-powered-by" in (k.lower() for k in headers):
+        tech.append(f"Powered-By: {headers.get('X-Powered-By')}")
+      if "wp-content" in html_lower or "wordpress" in html_lower:
+        tech.append("WordPress")
+      if "shopify" in html_lower:
+        tech.append("Shopify")
+      if "__next" in html_lower or "_next/static" in html_lower:
+        tech.append("Next.js / React")
+      if "cloudflare" in server.lower() or "cf-ray" in (
+          k.lower() for k in headers
+      ):
+        tech.append("Cloudflare CDN/WAF")
+      if "google-analytics" in html_lower or "gtag" in html_lower:
+        tech.append("Google Analytics")
+
+      return {
+          "source": "http_headers_tech",
+          "data": {
+              "final_url": str(resp.url),
+              "status_code": resp.status,
+              "present_security_headers": present,
+              "missing_security_headers": missing,
+              "detected_technologies": tech,
+          },
+      }
+  except Exception as e:
+    return {"source": "http_headers_tech", "error": str(e), "data": {}}
+
+
+async def fetch_well_known_files(
+    session: aiohttp.ClientSession, domain: str
+) -> dict:
+  found = {}
+  paths = ["/robots.txt", "/.well-known/security.txt", "/sitemap.xml"]
+  for p in paths:
+    try:
+      async with session.get(f"https://{domain}{p}", timeout=6) as resp:
+        if resp.status == 200:
+          text = await resp.text(errors="ignore")
+          found[p] = text[:600]
+    except Exception:
+      pass
+  return {"source": "well_known_files", "data": found}
 
 
 async def fetch_crt_sh(session: aiohttp.ClientSession, domain: str) -> dict:
@@ -87,10 +162,26 @@ async def fetch_crt_sh(session: aiohttp.ClientSession, domain: str) -> dict:
             name = name.strip().lower()
             if name and "*" not in name:
               subs.add(name)
-        return {"source": "crt.sh", "subdomains": sorted(list(subs))[:100]}
+        return {"source": "crt.sh", "subdomains": sorted(list(subs))[:150]}
   except Exception as e:
     return {"source": "crt.sh", "error": str(e), "subdomains": []}
   return {"source": "crt.sh", "subdomains": []}
+
+
+async def fetch_hackertarget_subs(
+    session: aiohttp.ClientSession, domain: str
+) -> dict:
+  url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
+  try:
+    async with session.get(url, timeout=10) as resp:
+      if resp.status == 200:
+        text = await resp.text()
+        if "API count exceeded" not in text and "error" not in text.lower():
+          lines = [line.split(",") for line in text.strip().splitlines() if "," in line]
+          return {"source": "hackertarget", "hosts": lines[:50]}
+  except Exception as e:
+    return {"source": "hackertarget", "error": str(e), "hosts": []}
+  return {"source": "hackertarget", "hosts": []}
 
 
 async def fetch_internetdb(session: aiohttp.ClientSession, ip: str) -> dict:
@@ -104,19 +195,38 @@ async def fetch_internetdb(session: aiohttp.ClientSession, ip: str) -> dict:
   return {"source": "internetdb", "data": {}}
 
 
-async def fetch_ip_geo(session: aiohttp.ClientSession, ip: str) -> dict:
-  url = f"http://ip-api.com/json/{ip}"
+async def fetch_ip_geo_and_asn(session: aiohttp.ClientSession, ip: str) -> dict:
+  url = f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,isp,org,as,asname,reverse"
   try:
     async with session.get(url, timeout=10) as resp:
       if resp.status == 200:
-        return {"source": "ip_geo", "data": await resp.json()}
+        return {"source": "ip_geo_asn", "data": await resp.json()}
   except Exception as e:
-    return {"source": "ip_geo", "error": str(e), "data": {}}
-  return {"source": "ip_geo", "data": {}}
+    return {"source": "ip_geo_asn", "error": str(e), "data": {}}
+  return {"source": "ip_geo_asn", "data": {}}
+
+
+async def fetch_urlhaus(session: aiohttp.ClientSession, host: str) -> dict:
+  url = "https://urlhaus-api.abuse.ch/v1/host/"
+  try:
+    async with session.post(url, data={"host": host}, timeout=10) as resp:
+      if resp.status == 200:
+        data = await resp.json()
+        return {
+            "source": "urlhaus_threatfeed",
+            "data": {
+                "query_status": data.get("query_status"),
+                "url_count": data.get("url_count", 0),
+                "blacklists": data.get("blacklists", {}),
+            },
+        }
+  except Exception as e:
+    return {"source": "urlhaus_threatfeed", "error": str(e), "data": {}}
+  return {"source": "urlhaus_threatfeed", "data": {}}
 
 
 async def fetch_wayback(session: aiohttp.ClientSession, domain: str) -> dict:
-  url = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=json&fl=original&collapse=urlkey&limit=30"
+  url = f"http://web.archive.org/cdx/search/cdx?url=*.{domain}/*&output=json&fl=original&collapse=urlkey&limit=40"
   try:
     async with session.get(url, timeout=15) as resp:
       if resp.status == 200:
@@ -143,25 +253,50 @@ async def collect_all_data(target: str) -> dict:
   results = {"target": info, "timestamp": datetime.utcnow().isoformat()}
 
   async with aiohttp.ClientSession(
-      headers={"User-Agent": "OSINT-Dossier-Engine/1.0"}
+      headers={"User-Agent": "OSINT-Dossier-Engine/1.1"}
   ) as session:
     tasks = []
 
     if info["type"] == "domain":
       domain = info["value"]
       tasks.append(fetch_crt_sh(session, domain))
+      tasks.append(fetch_hackertarget_subs(session, domain))
+      tasks.append(fetch_http_security_and_tech(session, domain))
+      tasks.append(fetch_well_known_files(session, domain))
+      tasks.append(fetch_urlhaus(session, domain))
       tasks.append(fetch_wayback(session, domain))
       tasks.append(loop.run_in_executor(None, get_dns_records, domain))
       tasks.append(loop.run_in_executor(None, get_whois_info, domain))
       tasks.append(loop.run_in_executor(None, get_ssl_info, domain))
+
+      # Flera riktade OSINT-sökningar
       tasks.append(
-          loop.run_in_executor(None, search_ddg, f'"{domain}" OR site:{domain}')
+          loop.run_in_executor(None, search_ddg, f'site:{domain}', 10)
       )
       tasks.append(
           loop.run_in_executor(
               None,
               search_ddg,
-              f'site:github.com "{domain}" OR "{domain}" password OR leak',
+              f'site:{domain} filetype:pdf OR filetype:xlsx OR filetype:docx',
+              8,
+          )
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None, search_ddg, f'"@{domain}" OR "{domain}" email', 8
+          )
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None,
+              search_ddg,
+              f'site:github.com "{domain}" OR "{domain}" leak',
+              8,
+          )
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None, search_ddg, f'site:linkedin.com "{domain}"', 8
           )
       )
 
@@ -169,26 +304,29 @@ async def collect_all_data(target: str) -> dict:
         ip = socket.gethostbyname(domain)
         results["resolved_ip"] = ip
         tasks.append(fetch_internetdb(session, ip))
-        tasks.append(fetch_ip_geo(session, ip))
+        tasks.append(fetch_ip_geo_and_asn(session, ip))
       except socket.gaierror:
         results["resolved_ip"] = None
 
     elif info["type"] == "ip":
       ip = info["value"]
       tasks.append(fetch_internetdb(session, ip))
-      tasks.append(fetch_ip_geo(session, ip))
-      tasks.append(loop.run_in_executor(None, search_ddg, f'"{ip}"'))
+      tasks.append(fetch_ip_geo_and_asn(session, ip))
+      tasks.append(fetch_urlhaus(session, ip))
+      tasks.append(loop.run_in_executor(None, search_ddg, f'"{ip}"', 10))
 
-    else:  # person eller organization
+    else:
       val = info["value"]
-      tasks.append(loop.run_in_executor(None, search_ddg, f'"{val}"'))
+      tasks.append(loop.run_in_executor(None, search_ddg, f'"{val}"', 10))
       tasks.append(
           loop.run_in_executor(
-              None, search_ddg, f'"{val}" site:linkedin.com OR site:github.com'
+              None, search_ddg, f'"{val}" site:linkedin.com OR site:github.com', 10
           )
       )
       tasks.append(
-          loop.run_in_executor(None, search_ddg, f'"{val}" news OR breach')
+          loop.run_in_executor(
+              None, search_ddg, f'"{val}" filetype:pdf OR news', 10
+          )
       )
 
     gathered = await asyncio.gather(*tasks)
