@@ -99,7 +99,6 @@ async def fetch_http_security_and_tech(
       present = {h: headers.get(h) for h in sec_headers if h in headers}
       missing = [h for h in sec_headers if h not in headers]
 
-      # Enkel teknik- och plattformsidentifiering
       tech = []
       html_lower = html.lower()
       server = headers.get("Server", "")
@@ -117,8 +116,6 @@ async def fetch_http_security_and_tech(
           k.lower() for k in headers
       ):
         tech.append("Cloudflare CDN/WAF")
-      if "google-analytics" in html_lower or "gtag" in html_lower:
-        tech.append("Google Analytics")
 
       return {
           "source": "http_headers_tech",
@@ -177,7 +174,9 @@ async def fetch_hackertarget_subs(
       if resp.status == 200:
         text = await resp.text()
         if "API count exceeded" not in text and "error" not in text.lower():
-          lines = [line.split(",") for line in text.strip().splitlines() if "," in line]
+          lines = [
+              line.split(",") for line in text.strip().splitlines() if "," in line
+          ]
           return {"source": "hackertarget", "hosts": lines[:50]}
   except Exception as e:
     return {"source": "hackertarget", "error": str(e), "hosts": []}
@@ -247,89 +246,12 @@ def search_ddg(query: str, max_results: int = 8) -> dict:
     return {"source": "ddg_search", "error": str(e), "results": []}
 
 
-async def collect_all_data(target: str) -> dict:
-  info = classify_target(target)
-  loop = asyncio.get_event_loop()
-  results = {"target": info, "timestamp": datetime.utcnow().isoformat()}
-
-  async with aiohttp.ClientSession(
-      headers={"User-Agent": "OSINT-Dossier-Engine/1.1"}
-  ) as session:
-    tasks = []
-
-    if info["type"] == "domain":
-      domain = info["value"]
-      tasks.append(fetch_crt_sh(session, domain))
-      tasks.append(fetch_hackertarget_subs(session, domain))
-      tasks.append(fetch_http_security_and_tech(session, domain))
-      tasks.append(fetch_well_known_files(session, domain))
-      tasks.append(fetch_urlhaus(session, domain))
-      tasks.append(fetch_wayback(session, domain))
-      tasks.append(loop.run_in_executor(None, get_dns_records, domain))
-      tasks.append(loop.run_in_executor(None, get_whois_info, domain))
-      tasks.append(loop.run_in_executor(None, get_ssl_info, domain))
-
-      # Flera riktade OSINT-sökningar
-      tasks.append(
-          loop.run_in_executor(None, search_ddg, f'site:{domain}', 10)
+async def fetch_company_business_data(
+    session: aiohttp.ClientSession, company_name: str
+) -> dict:
+  try:
+    with DDGS() as ddgs:
+      query = (
+          f'"{company_name}" årsredovisning OR omsättning OR styrelse OR bolagsfakta'
       )
-      tasks.append(
-          loop.run_in_executor(
-              None,
-              search_ddg,
-              f'site:{domain} filetype:pdf OR filetype:xlsx OR filetype:docx',
-              8,
-          )
-      )
-      tasks.append(
-          loop.run_in_executor(
-              None, search_ddg, f'"@{domain}" OR "{domain}" email', 8
-          )
-      )
-      tasks.append(
-          loop.run_in_executor(
-              None,
-              search_ddg,
-              f'site:github.com "{domain}" OR "{domain}" leak',
-              8,
-          )
-      )
-      tasks.append(
-          loop.run_in_executor(
-              None, search_ddg, f'site:linkedin.com "{domain}"', 8
-          )
-      )
-
-      try:
-        ip = socket.gethostbyname(domain)
-        results["resolved_ip"] = ip
-        tasks.append(fetch_internetdb(session, ip))
-        tasks.append(fetch_ip_geo_and_asn(session, ip))
-      except socket.gaierror:
-        results["resolved_ip"] = None
-
-    elif info["type"] == "ip":
-      ip = info["value"]
-      tasks.append(fetch_internetdb(session, ip))
-      tasks.append(fetch_ip_geo_and_asn(session, ip))
-      tasks.append(fetch_urlhaus(session, ip))
-      tasks.append(loop.run_in_executor(None, search_ddg, f'"{ip}"', 10))
-
-    else:
-      val = info["value"]
-      tasks.append(loop.run_in_executor(None, search_ddg, f'"{val}"', 10))
-      tasks.append(
-          loop.run_in_executor(
-              None, search_ddg, f'"{val}" site:linkedin.com OR site:github.com', 10
-          )
-      )
-      tasks.append(
-          loop.run_in_executor(
-              None, search_ddg, f'"{val}" filetype:pdf OR news', 10
-          )
-      )
-
-    gathered = await asyncio.gather(*tasks)
-    results["findings"] = gathered
-
-  return results
+      results = list(ddgs.text(query,
