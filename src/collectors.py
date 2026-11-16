@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import socket
 import ssl
@@ -276,28 +276,25 @@ async def fetch_person_socials_and_location(
     with DDGS() as ddgs:
       city_query = f'"{city}"' if city else ""
       queries = [
-          # Professionellt & Socialt
           f'"{name}" {city_query} site:linkedin.com/in/',
-          f'"{name}" {city_query} site:github.com OR site:gitlab.com',
-          f'"{name}" {city_query} site:stackoverflow.com',
-          # Publikationer & Starka fotavtryck
-          f'"{name}" {city_query} site:scholar.google.com OR site:researchgate.net',
-          # Bolag & Styrelseroller
-          f'"{name}" {city_query} styrelse OR VD OR grundare OR "alla bolag"',
-          # CV & Erfarenhet
-          f'"{name}" {city_query} CV OR resume OR erfarenhet OR "om mig"',
+          f'"{name}" {city_query} site:github.com OR site:ratsit.se OR site:allabolag.se',
       ]
 
       all_results = []
       for q in queries:
-        res = list(ddgs.text(q, max_results=4))
-        all_results.extend(res)
+        res = list(ddgs.text(q, max_results=6))
+        for r in res:
+          href = r.get("href", "").lower()
+          # Filtrera bort vanliga skräpsajter som ger orelevanta träffar
+          if "answers.com" in href or "calculateme.com" in href:
+            continue
+          all_results.append(r)
 
       return {
           "source": "person_osint",
           "target_name": name,
           "city": city,
-          "results": all_results,
+          "results": all_results[:15],
       }
   except Exception as e:
     return {"source": "person_osint", "error": str(e), "results": []}
@@ -306,7 +303,7 @@ async def fetch_person_socials_and_location(
 async def collect_all_data(target: str, city: str = "") -> dict:
   info = classify_target(target)
   loop = asyncio.get_event_loop()
-  results = {"target": info, "timestamp": datetime.utcnow().isoformat()}
+  results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
 
   async with aiohttp.ClientSession(
       headers={"User-Agent": "OSINT-Dossier-Engine/1.1"}
