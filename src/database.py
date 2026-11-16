@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import sqlite3
 
@@ -30,15 +30,14 @@ def save_scan(gathered_data: dict, risk_report: dict):
 
   target = gathered_data.get("target", {}).get("value", "unknown")
   target_type = gathered_data.get("target", {}).get("type", "unknown")
-  timestamp = datetime.utcnow().isoformat()
+  timestamp = datetime.now(timezone.utc).isoformat()
   total_score = risk_report.get("total_score", 0)
   severity = risk_report.get("severity", "OKÄND")
   raw_data = json.dumps(gathered_data)
 
   cursor.execute(
       """
-        INSERT INTO scans (target, target_type, timestamp, total_score, severity,"
-      " raw_data)
+        INSERT INTO scans (target, target_type, timestamp, total_score, severity, raw_data)
         VALUES (?, ?, ?, ?, ?, ?)
     """,
       (target, target_type, timestamp, total_score, severity, raw_data),
