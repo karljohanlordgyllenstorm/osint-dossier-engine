@@ -1,0 +1,11 @@
+aiohttp
+dnspython
+python-whois
+duckduckgo-search
+networkx
+matplotlib
+weasyprint
+jinja2
+gradio
+requests
+beautifulsoup4
