@@ -254,4 +254,118 @@ async def fetch_company_business_data(
       query = (
           f'"{company_name}" årsredovisning OR omsättning OR styrelse OR bolagsfakta'
       )
-      results = list(ddgs.text(query,
+      results = list(ddgs.text(query, max_results=6))
+      return {
+          "source": "company_intelligence",
+          "query": company_name,
+          "results": results,
+      }
+  except Exception as e:
+    return {"source": "company_intelligence", "error": str(e), "results": []}
+
+
+async def fetch_person_socials_and_location(
+    session: aiohttp.ClientSession, name: str, city: str = ""
+) -> dict:
+  try:
+    with DDGS() as ddgs:
+      city_query = f'"{city}"' if city else ""
+      queries = [
+          f'"{name}" {city_query} site:linkedin.com/in/',
+          f'"{name}" {city_query} site:github.com OR site:x.com OR site:instagram.com OR site:facebook.com',
+          f'"{name}" {city_query} CV OR resume OR erfarenhet',
+      ]
+      all_results = []
+      for q in queries:
+        res = list(ddgs.text(q, max_results=4))
+        all_results.extend(res)
+      return {
+          "source": "person_osint",
+          "target_name": name,
+          "city": city,
+          "results": all_results,
+      }
+  except Exception as e:
+    return {"source": "person_osint", "error": str(e), "results": []}
+
+
+async def collect_all_data(target: str, city: str = "") -> dict:
+  info = classify_target(target)
+  loop = asyncio.get_event_loop()
+  results = {"target": info, "timestamp": datetime.utcnow().isoformat()}
+
+  async with aiohttp.ClientSession(
+      headers={"User-Agent": "OSINT-Dossier-Engine/1.1"}
+  ) as session:
+    tasks = []
+
+    if info["type"] == "domain":
+      domain = info["value"]
+      tasks.append(fetch_crt_sh(session, domain))
+      tasks.append(fetch_hackertarget_subs(session, domain))
+      tasks.append(fetch_http_security_and_tech(session, domain))
+      tasks.append(fetch_well_known_files(session, domain))
+      tasks.append(fetch_urlhaus(session, domain))
+      tasks.append(fetch_wayback(session, domain))
+      tasks.append(loop.run_in_executor(None, get_dns_records, domain))
+      tasks.append(loop.run_in_executor(None, get_whois_info, domain))
+      tasks.append(loop.run_in_executor(None, get_ssl_info, domain))
+      tasks.append(loop.run_in_executor(None, search_ddg, f"site:{domain}", 10))
+      tasks.append(
+          loop.run_in_executor(
+              None,
+              search_ddg,
+              f"site:{domain} filetype:pdf OR filetype:xlsx OR filetype:docx",
+              8,
+          )
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None, search_ddg, f'"@{domain}" OR "{domain}" email', 8
+          )
+      )
+
+      try:
+        ip = socket.gethostbyname(domain)
+        results["resolved_ip"] = ip
+        tasks.append(fetch_internetdb(session, ip))
+        tasks.append(fetch_ip_geo_and_asn(session, ip))
+      except socket.gaierror:
+        results["resolved_ip"] = None
+
+    elif info["type"] == "ip":
+      ip = info["value"]
+      tasks.append(fetch_internetdb(session, ip))
+      tasks.append(fetch_ip_geo_and_asn(session, ip))
+      tasks.append(fetch_urlhaus(session, ip))
+      tasks.append(loop.run_in_executor(None, search_ddg, f'"{ip}"', 10))
+
+    elif info["type"] == "organization":
+      org_val = info["value"]
+      tasks.append(fetch_company_business_data(session, org_val))
+      tasks.append(
+          loop.run_in_executor(
+              None, search_ddg, f'"{org_val}" styrelse OR ägare OR omsättning', 10
+          )
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None,
+              search_ddg,
+              f'"{org_val}" site:linkedin.com OR site:allabolag.se',
+              8,
+          )
+      )
+
+    else:  # person
+      person_val = info["value"]
+      # Här anropas den nya funktionen för person-OSINT med namn och stad
+      tasks.append(
+          fetch_person_socials_and_location(session, person_val, city)
+      )
+      city_str = f'"{city}"' if city else ""
+      tasks.append(
+          loop.run_in_executor(
+              None,
+              search_ddg,
+              f'"{person_val
