@@ -8,19 +8,26 @@ from src.pdf_generator import generate_pdf_dossier
 from src.risk_engine import calculate_risk_score
 
 
-def run_pipeline(target: str):
+def run_pipeline(target: str, city: str):
   if not target or not target.strip():
-    return "Ange ett giltigt mål (t.ex. example.com eller 8.8.8.8).", None, None
+    return "Ange ett giltigt mål (t.ex. example.com, Acme Corp eller Anna Andersson).", None, None
 
   target_clean = target.strip()
-  safe_name = "".join(c if c.isalnum() else "_" for c in target_clean)
+  city_clean = city.strip() if city else ""
+
+  # Skapa säkra filnamn
+  safe_name = "".join(
+      c if c.isalnum() else "_" for c in f"{target_clean}_{city_clean}"
+  )
   graph_file = f"graph_{safe_name}.png"
   pdf_file = f"dossier_{safe_name}.pdf"
 
-  # 1 & 2. Samla data parallellt
+  # 1 & 2. Samla data parallellt (skickar med stad om det är en person)
   loop = asyncio.new_event_loop()
   asyncio.set_event_loop(loop)
-  gathered = loop.run_until_complete(collect_all_data(target_clean))
+  gathered = loop.run_until_complete(
+      collect_all_data(target_clean, city=city_clean)
+  )
 
   # 3. Bygg entity-graf
   build_entity_graph(gathered, output_path=graph_file)
@@ -31,12 +38,12 @@ def run_pipeline(target: str):
   # 5. Kör AI-analys (Ollama / fallback)
   ai_res = generate_ai_analysis(gathered, risk)
 
-  # 6. Generera 13-sidig PDF-dossier
+  # 6. Generera PDF-dossier
   generate_pdf_dossier(gathered, risk, ai_res, graph_file, output_pdf=pdf_file)
 
-  summary_md = f"""### Analys klar för `{target_clean}`
+  summary_md = f"""### Analys klar för `{target_clean}` {f"({city_clean})" if city_clean else ""}
 - **Identifierad typ:** `{gathered['target']['type']}`
-- **Upplöst IP:** `{gathered.get('resolved_ip') or 'N/A'}`
+- **Upplöst IP / Sökdata:** `{gathered.get('resolved_ip') or 'Företag / Person (OSINT)'}`
 - **Total Riskpoäng:** **{risk['total_score']} / 100 ({risk['severity']})**
 
 #### Executive Summary
@@ -54,11 +61,15 @@ with gr.Blocks(title="OSINT Dossier Engine", theme=gr.themes.Soft()) as demo:
 
   with gr.Row():
     target_input = gr.Textbox(
-        label="Target (t.ex. example.com, 1.1.1.1, Acme Corp)",
-        placeholder="example.com",
+        label="Target (Domän, Företagsnamn eller Person)",
+        placeholder="t.ex. acme.com eller Anna Andersson",
     )
-    run_btn = gr.Button("Starta OSINT-skanning", variant="primary")
+    city_input = gr.Textbox(
+        label="Stad / Ort (Valfritt, primärt för personer)",
+        placeholder="t.ex. Stockholm",
+    )
 
+  run_btn = gr.Button("Starta OSINT-skanning & Generera Dossier", variant="primary")
   status_output = gr.Markdown()
 
   with gr.Row():
@@ -67,7 +78,7 @@ with gr.Blocks(title="OSINT Dossier Engine", theme=gr.themes.Soft()) as demo:
 
   run_btn.click(
       fn=run_pipeline,
-      inputs=[target_input],
+      inputs=[target_input, city_input],
       outputs=[status_output, graph_output, pdf_output],
   )
 
