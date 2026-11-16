@@ -276,14 +276,23 @@ async def fetch_person_socials_and_location(
     with DDGS() as ddgs:
       city_query = f'"{city}"' if city else ""
       queries = [
+          # Professionellt & Socialt
           f'"{name}" {city_query} site:linkedin.com/in/',
-          f'"{name}" {city_query} site:github.com OR site:x.com OR site:facebook.com OR site:instagram.com',
-          f'"{name}" {city_query} ratsit OR merinfo OR eniro',
+          f'"{name}" {city_query} site:github.com OR site:gitlab.com',
+          f'"{name}" {city_query} site:stackoverflow.com',
+          # Publikationer & Starka fotavtryck
+          f'"{name}" {city_query} site:scholar.google.com OR site:researchgate.net',
+          # Bolag & Styrelseroller
+          f'"{name}" {city_query} styrelse OR VD OR grundare OR "alla bolag"',
+          # CV & Erfarenhet
+          f'"{name}" {city_query} CV OR resume OR erfarenhet OR "om mig"',
       ]
+
       all_results = []
       for q in queries:
-        res = list(ddgs.text(q, max_results=5))
+        res = list(ddgs.text(q, max_results=4))
         all_results.extend(res)
+
       return {
           "source": "person_osint",
           "target_name": name,
