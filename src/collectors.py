@@ -16,7 +16,8 @@ def classify_target(target: str) -> dict:
   elif re.match(r"^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$", target):
     return {"type": "domain", "value": target.lower()}
   elif any(
-      s in target.lower() for s in ["ab", "inc", "corp", "ltd", "gmbh", "llc"]
+      s in target.lower()
+      for s in ["ab", "inc", "corp", "ltd", "gmbh", "llc", "aktiebolag"]
   ):
     return {"type": "organization", "value": target}
   return {"type": "person", "value": target}
@@ -251,10 +252,14 @@ async def fetch_company_business_data(
 ) -> dict:
   try:
     with DDGS() as ddgs:
-      query = (
-          f'"{company_name}" årsredovisning OR omsättning OR styrelse OR bolagsfakta'
-      )
-      results = list(ddgs.text(query, max_results=6))
+      queries = [
+          f'"{company_name}" site:allabolag.se OR site:ratsit.se OR site:proff.se',
+          f'"{company_name}" omsättning resultat styrelse ägare',
+      ]
+      results = []
+      for q in queries:
+        res = list(ddgs.text(q, max_results=5))
+        results.extend(res)
       return {
           "source": "company_intelligence",
           "query": company_name,
@@ -272,12 +277,12 @@ async def fetch_person_socials_and_location(
       city_query = f'"{city}"' if city else ""
       queries = [
           f'"{name}" {city_query} site:linkedin.com/in/',
-          f'"{name}" {city_query} site:github.com OR site:x.com OR site:instagram.com OR site:facebook.com',
-          f'"{name}" {city_query} CV OR resume OR erfarenhet',
+          f'"{name}" {city_query} site:github.com OR site:x.com OR site:facebook.com OR site:instagram.com',
+          f'"{name}" {city_query} ratsit OR merinfo OR eniro',
       ]
       all_results = []
       for q in queries:
-        res = list(ddgs.text(q, max_results=4))
+        res = list(ddgs.text(q, max_results=5))
         all_results.extend(res)
       return {
           "source": "person_osint",
@@ -345,21 +350,20 @@ async def collect_all_data(target: str, city: str = "") -> dict:
       tasks.append(fetch_company_business_data(session, org_val))
       tasks.append(
           loop.run_in_executor(
-              None, search_ddg, f'"{org_val}" styrelse OR ägare OR omsättning', 10
+              None,
+              search_ddg,
+              f'"{org_val}" site:allabolag.se OR site:ratsit.se OR site:proff.se',
+              10,
           )
       )
       tasks.append(
           loop.run_in_executor(
-              None,
-              search_ddg,
-              f'"{org_val}" site:linkedin.com OR site:allabolag.se',
-              8,
+              None, search_ddg, f'"{org_val}" styrelse OR ägare OR omsättning', 8
           )
       )
 
     else:  # person
       person_val = info["value"]
-      # Här anropas den nya funktionen för person-OSINT med namn och stad
       tasks.append(
           fetch_person_socials_and_location(session, person_val, city)
       )
@@ -368,4 +372,20 @@ async def collect_all_data(target: str, city: str = "") -> dict:
           loop.run_in_executor(
               None,
               search_ddg,
-              f'"{person_val
+              f'"{person_val}" {city_str} site:linkedin.com/in/',
+              10,
+          )
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None,
+              search_ddg,
+              f'"{person_val}" {city_str} ratsit OR merinfo OR eniro',
+              8,
+          )
+      )
+
+    gathered = await asyncio.gather(*tasks)
+    results["findings"] = gathered
+
+  return results
