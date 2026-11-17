@@ -65,10 +65,8 @@ def generate_pdf_dossier(
   company_person_html = ""
   diaries_property_html = ""
   contacts_socials_html = ""
-  youtube_html = ""
   raw_sections = ""
 
-  # Extrahering av finansiella nyckeltal (Omsättning, Resultat, Bokslut)
   financial_rows = ""
   fin_keywords = [
       "omsättning",
@@ -90,7 +88,6 @@ def generate_pdf_dossier(
         for a in articles:
           title = a.get("title", "")
           body_text = f"{title} {a.get('source', '')}"
-          # Kolla om artikeln innehåller finansiell information
           if any(kw in body_text.lower() for kw in fin_keywords):
             financial_rows += f"""
                     <tr>
@@ -99,7 +96,6 @@ def generate_pdf_dossier(
                         <td><span class='url-wrap'>{html.escape(a.get('url',''))}</span></td>
                     </tr>
                     """
-
           items += f"<li><strong>{html.escape(title)}</strong> <span style='color:#64748b;'>({html.escape(a.get('source',''))} — {html.escape(a.get('published',''))})</span><br><span class='url-wrap'>{html.escape(a.get('url',''))}</span></li>"
         news_html += f"<ul>{items}</ul>"
 
@@ -114,7 +110,7 @@ def generate_pdf_dossier(
           if any(kw in f"{rtitle} {rbody}".lower() for kw in fin_keywords):
             financial_rows += f"""
                     <tr>
-                        <td><strong>Bolagsregister / Web</strong></td>
+                        <td><strong>Bolagsregister</strong></td>
                         <td>{html.escape(rtitle)}: {html.escape(rbody)}</td>
                         <td><span class='url-wrap'>{html.escape(r.get('href',''))}</span></td>
                     </tr>
@@ -144,45 +140,24 @@ def generate_pdf_dossier(
             f"<ul class='data-list'>{items}</ul>"
         )
 
-    elif src == "public_contacts_socials":
-      data = f.get("data", {})
-      emails = data.get("emails", [])
-      socials = data.get("social_profiles", [])
-      if emails or socials:
-        e_str = (
-            ", ".join(html.escape(e) for e in emails)
-            or "Inga publika e-postadresser hittades"
+    elif src == "person_osint":
+      res = f.get("results", [])
+      if res:
+        items = "".join(
+            f"<li><strong>{html.escape(r.get('title',''))}</strong><br>"
+            f"<span class='url-wrap'>{html.escape(r.get('href',''))}</span><br>"
+            f"<span style='color:#334155;'>{html.escape(r.get('body',''))}</span></li>"
+            for r in res
         )
-        s_items = "".join(
-            f"<li><span class='url-wrap'>{html.escape(s)}</span></li>"
-            for s in socials
-        ) or "<li>Inga officiella sociala länkar hittades</li>"
-        contacts_socials_html += f"""
-        <div class="box">
-            <p><strong>Publika e-postadresser:</strong> {e_str}</p>
-            <p><strong>Identifierade sociala kanaler:</strong></p>
-            <ul class='data-list'>{s_items}</ul>
-        </div>
-        """
-
-    elif src == "crt.sh":
-      subs = f.get("subdomains", [])
-      raw_sections += (
-          f"<h3>Subdomäner (Certificate Transparency: {len(subs)} st)</h3>"
-      )
-      raw_sections += f"<p class='mono'>{', '.join(html.escape(s) for s in subs[:100]) or 'Inga hittades'}</p>"
-
-    elif src == "dns":
-      raw_sections += "<h3>DNS-poster</h3><ul>"
-      for k, v in f.get("data", {}).items():
-        raw_sections += f"<li><strong>{k}:</strong> {html.escape(', '.join(v) if v else 'Saknas')}</li>"
-      raw_sections += "</ul>"
+        contacts_socials_html += (
+            f"<h3>Sociala Kanalkopplingar &amp; Nätverk</h3>"
+            f"<ul class='data-list'>{items}</ul>"
+        )
 
   if not financial_rows:
     financial_rows = (
-        "<tr><td colspan='3'>Inga direkta finansiella nyckeltal eller"
-        " omsättningsrapporter kunde extraheras automatiskt ur"
-        " sökresultaten.</td></tr>"
+        "<tr><td colspan='3'>Inga direkta finansiella nyckeltal kunde"
+        " extraheras automatiskt.</td></tr>"
     )
 
   html_content = f"""
@@ -356,13 +331,12 @@ def generate_pdf_dossier(
     <div class="box">{html.escape(ai_res.get('executive_summary', ''))}</div>
 
     <h2>2. Finansiella Nyckeltal, Omsättning &amp; Bokslut</h2>
-    <p style="color:#475569;">Automatiskt extraherade ekonomiska referenser och rapporter från öppna källor och nyhetsarkiv:</p>
     <table class="data-table">
         <thead>
             <tr>
-                <th style="width:22%;">Källa / Medium</th>
-                <th style="width:53%;">Extraherad information / Rubrik</th>
-                <th style="width:25%;">Verifierbar URL</th>
+                <th style="width:22%;">Källa</th>
+                <th style="width:53%;">Extraherad information</th>
+                <th style="width:25%;">URL</th>
             </tr>
         </thead>
         <tbody>
@@ -379,7 +353,7 @@ def generate_pdf_dossier(
     <h2>5. Verifierad Mediebevakning</h2>
     {news_html}
 
-    <h2>6. Sociala Kanaler &amp; Publika Kontakter</h2>
+    <h2>6. Sociala Kanaler &amp; Publika Nätverk</h2>
     {contacts_socials_html}
 
     <h2>7. Exponerings- &amp; Riskanalys</h2>
@@ -406,4 +380,12 @@ def generate_pdf_dossier(
     <div class="page-break"></div>
     <h2>10. Teknisk Bilaga &amp; Evidenskedja (Raw Data Audit Trail)</h2>
     <div class="mono" style="margin-bottom: 12px;">
-        <strong>Master SHA-256 Hash:</strong> {master
+        <strong>Master SHA-256 Hash:</strong> {master_hash}
+    </div>
+    {raw_sections}
+
+    </body>
+    </html>
+    """
+  HTML(string=html_content).write_pdf(output_pdf)
+  return output_pdf
