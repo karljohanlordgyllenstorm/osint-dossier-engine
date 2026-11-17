@@ -69,31 +69,45 @@ def generate_pdf_dossier(
 
   for f in gathered.get("findings", []):
     src = f.get("source", "okänd")
+
     if src == "google_news":
       articles = f.get("articles", [])
       if articles:
         items = "".join(
             f"<li><strong>{html.escape(a.get('title',''))}</strong> "
             f"<span style='color:#64748b;'>({html.escape(a.get('source',''))} — {html.escape(a.get('published',''))})</span><br>"
-            f"<small style='color:#0284c7;'>{html.escape(a.get('url',''))}</small></li>"
+            f"<span class='url-wrap'>{html.escape(a.get('url',''))}</span></li>"
             for a in articles
         )
         news_html += f"<ul>{items}</ul>"
-    elif src in ["company_intelligence", "person_osint"]:
+
+    elif src in ["company_intelligence", "person_osint", "official_registry"]:
       res = f.get("results", [])
+      reg_data = f.get("registry_data")
+
       if res:
         label = (
-            "Bokslut, Nyckeltal & Bolagsregister"
+            "Bolagsdata, Bokslut & Nyckeltal"
             if src == "company_intelligence"
-            else "Personkopplingar, Styrelseroller & Profiler"
+            else (
+                "Officiella Registeruppgifter"
+                if src == "official_registry"
+                else "Personkopplingar & Styrelseroller"
+            )
         )
         items = "".join(
-            f"<li><strong>{html.escape(r.get('title',''))}</strong> — "
-            f"<small style='color:#0284c7;'>{html.escape(r.get('href',''))}</small><br>"
+            f"<li><strong>{html.escape(r.get('title',''))}</strong><br>"
+            f"<span class='url-wrap'>{html.escape(r.get('href',''))}</span><br>"
             f"<span style='color:#334155;'>{html.escape(r.get('body',''))}</span></li>"
             for r in res
         )
-        company_person_html += f"<h3>{label}</h3><ul>{items}</ul>"
+        company_person_html += f"<h3>{label}</h3><ul class='data-list'>{items}</ul>"
+      elif reg_data:
+        company_person_html += (
+            f"<h3>Officiellt Register (API)</h3>"
+            f"<div class='mono'><pre>{html.escape(json.dumps(reg_data, indent=2, ensure_ascii=False))}</pre></div>"
+        )
+
     elif src == "public_contacts_socials":
       data = f.get("data", {})
       emails = data.get("emails", [])
@@ -104,54 +118,60 @@ def generate_pdf_dossier(
             or "Inga publika e-postadresser hittades"
         )
         s_items = "".join(
-            f"<li>{html.escape(s)}</li>" for s in socials
+            f"<li><span class='url-wrap'>{html.escape(s)}</span></li>"
+            for s in socials
         ) or "<li>Inga officiella sociala länkar hittades</li>"
         contacts_socials_html += f"""
         <div class="box">
             <p><strong>Publika e-postadresser:</strong> {e_str}</p>
             <p><strong>Identifierade sociala kanaler:</strong></p>
-            <ul>{s_items}</ul>
+            <ul class='data-list'>{s_items}</ul>
         </div>
         """
+
     elif src == "youtube_osint":
       vids = f.get("results", [])
       if vids:
         items = "".join(
-            f"<li><strong>{html.escape(v.get('title',''))}</strong> — "
-            f"<small style='color:#0284c7;'>{html.escape(v.get('href',''))}</small><br>"
+            f"<li><strong>{html.escape(v.get('title',''))}</strong><br>"
+            f"<span class='url-wrap'>{html.escape(v.get('href',''))}</span><br>"
             f"<span style='color:#334155;'>{html.escape(v.get('body',''))}</span></li>"
             for v in vids
         )
-        youtube_html += f"<h3>YouTube-videor & Medieframträdanden</h3><ul>{items}</ul>"
+        youtube_html += f"<h3>YouTube-medieframträdanden</h3><ul class='data-list'>{items}</ul>"
+
     elif src == "crt.sh":
       subs = f.get("subdomains", [])
       raw_sections += (
           f"<h3>Subdomäner (Certificate Transparency: {len(subs)} st)</h3>"
       )
-      raw_sections += f"<p class='mono'>{', '.join(html.escape(s) for s in subs[:60]) or 'Inga hittades'}</p>"
+      raw_sections += f"<p class='mono'>{', '.join(html.escape(s) for s in subs[:100]) or 'Inga hittades'}</p>"
+
     elif src == "dns":
       raw_sections += "<h3>DNS-poster</h3><ul>"
       for k, v in f.get("data", {}).items():
         raw_sections += f"<li><strong>{k}:</strong> {html.escape(', '.join(v) if v else 'Saknas')}</li>"
       raw_sections += "</ul>"
+
     elif src == "http_headers_tech":
       d = f.get("data", {})
       raw_sections += "<h3>HTTP-säkerhet & Teknikstack</h3>"
       raw_sections += f"<p><strong>Identifierad teknik:</strong> {html.escape(', '.join(d.get('detected_technologies', [])) or 'Okänd')}</p>"
       raw_sections += f"<p><strong>Saknade säkerhetsrubriker:</strong> {html.escape(', '.join(d.get('missing_security_headers', [])) or 'Inga')}</p>"
+
     elif src == "ddg_search":
       res = f.get("results", [])
       if res:
         raw_sections += f"<h3>Sökmotorinventering ({html.escape(f.get('query', ''))})</h3><ul>"
         for r in res[:10]:
-          raw_sections += f"<li><strong>{html.escape(r.get('title',''))}</strong> — <small>{html.escape(r.get('href',''))}</small><br><span style='color:#475569;'>{html.escape(r.get('body',''))}</span></li>"
+          raw_sections += f"<li><strong>{html.escape(r.get('title',''))}</strong><br><span class='url-wrap'>{html.escape(r.get('href',''))}</span><br><span style='color:#475569;'>{html.escape(r.get('body',''))}</span></li>"
         raw_sections += "</ul>"
 
   if not news_html:
     news_html = "<p style='color:#64748b;'>Inga aktuella nyheter hittades.</p>"
   if not company_person_html:
     company_person_html = (
-        "<p style='color:#64748b;'>Inga relevanta kopplingar hittades.</p>"
+        "<p style='color:#64748b;'>Inga bolagsdata eller registerkopplingar hittades.</p>"
     )
   if not contacts_socials_html and not youtube_html:
     contacts_socials_html = (
@@ -185,54 +205,63 @@ def generate_pdf_dossier(
             color: #1e293b;
             line-height: 1.48;
             font-size: 9.5pt;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }}
+        .url-wrap {{
+            font-family: 'Courier New', monospace;
+            font-size: 8pt;
+            color: #0284c7;
+            word-break: break-all;
+            overflow-wrap: break-word;
         }}
         .cover {{
             background: #0f172a;
             color: #ffffff;
-            padding: 36px 32px;
+            padding: 32px 28px;
             border-radius: 6px;
-            margin-bottom: 24px;
+            margin-bottom: 20px;
         }}
         .cover h1 {{
-            margin: 0 0 8px 0;
-            font-size: 21pt;
+            margin: 0 0 6px 0;
+            font-size: 20pt;
         }}
         .cover .subtitle {{
             color: #94a3b8;
-            font-size: 10.5pt;
-            margin-bottom: 22px;
+            font-size: 10pt;
+            margin-bottom: 18px;
         }}
         .meta-grid {{
             width: 100%;
             border-collapse: collapse;
-            margin-top: 10px;
+            margin-top: 8px;
         }}
         .meta-grid td {{
-            padding: 8px 10px;
+            padding: 6px 8px;
             background: #1e293b;
             border: 1px solid #334155;
-            font-size: 9pt;
+            font-size: 8.5pt;
         }}
         h2 {{
             color: #0f172a;
             border-bottom: 2px solid #0f172a;
             padding-bottom: 4px;
-            margin-top: 22px;
-            font-size: 13pt;
+            margin-top: 20px;
+            font-size: 12.5pt;
             page-break-after: avoid;
         }}
         h3 {{
             color: #334155;
-            font-size: 10.5pt;
-            margin-top: 14px;
-            margin-bottom: 6px;
+            font-size: 10pt;
+            margin-top: 12px;
+            margin-bottom: 4px;
             page-break-after: avoid;
         }}
         .box {{
             background: #f8fafc;
             border-left: 4px solid #2563eb;
-            padding: 12px 15px;
-            margin: 12px 0;
+            padding: 10px 14px;
+            margin: 10px 0;
             border-radius: 0 4px 4px 0;
         }}
         .risk-badge {{
@@ -240,30 +269,31 @@ def generate_pdf_dossier(
             background: {badge_color};
             color: #fff;
             font-weight: bold;
-            padding: 4px 10px;
+            padding: 3px 8px;
             border-radius: 4px;
-            font-size: 10pt;
+            font-size: 9.5pt;
         }}
         table.data-table {{
             width: 100%;
             border-collapse: collapse;
-            margin-top: 10px;
-            font-size: 8.8pt;
+            margin-top: 8px;
+            font-size: 8.5pt;
         }}
         table.data-table th {{
             background: #0f172a;
             color: #fff;
             text-align: left;
-            padding: 7px 8px;
+            padding: 6px 8px;
         }}
         table.data-table td {{
             border-bottom: 1px solid #cbd5e1;
-            padding: 7px 8px;
+            padding: 6px 8px;
             vertical-align: top;
+            word-break: break-word;
         }}
         .sev-pill {{
             color: #fff;
-            padding: 2px 6px;
+            padding: 2px 5px;
             border-radius: 3px;
             font-size: 7.5pt;
             font-weight: bold;
@@ -271,20 +301,24 @@ def generate_pdf_dossier(
         }}
         .mono {{
             font-family: 'Courier New', monospace;
-            font-size: 8pt;
+            font-size: 7.5pt;
             background: #f1f5f9;
             padding: 8px;
             border-radius: 4px;
-            word-wrap: break-word;
+            word-break: break-all;
+            overflow-wrap: break-word;
+        }}
+        .data-list li {{
+            margin-bottom: 8px;
         }}
         .graph-box {{
             text-align: center;
-            margin: 14px 0;
+            margin: 12px 0;
             page-break-inside: avoid;
         }}
         .graph-box img {{
             max-width: 100%;
-            max-height: 360px;
+            max-height: 320px;
             border: 1px solid #cbd5e1;
             border-radius: 4px;
         }}
@@ -296,7 +330,7 @@ def generate_pdf_dossier(
     <body>
 
     <div class="cover">
-        <div style="font-size:8.5pt; letter-spacing:1.5px; color:#38bdf8; font-weight:bold; margin-bottom:6px;">
+        <div style="font-size:8pt; letter-spacing:1.5px; color:#38bdf8; font-weight:bold; margin-bottom:4px;">
             LEGAL-GRADE OSINT &amp; EVIDENCE DOSSIER
         </div>
         <h1>Dossier: {target_val}</h1>
@@ -309,8 +343,8 @@ def generate_pdf_dossier(
                 <td><strong>Risknivå:</strong> <span class="risk-badge">{risk['severity']} ({score}/100)</span></td>
             </tr>
         </table>
-        <div style="margin-top: 12px; font-size: 7.5pt; color: #94a3b8; font-family: monospace;">
-            Rapportens kryptografiska SHA-256 Hash (Chain of Custody): {master_hash}
+        <div style="margin-top: 10px; font-size: 7.5pt; color: #94a3b8; font-family: monospace; word-break: break-all;">
+            <strong>Chain of Custody SHA-256 Hash:</strong> {master_hash}
         </div>
     </div>
 
@@ -351,7 +385,10 @@ def generate_pdf_dossier(
 
     <div class="page-break"></div>
     <h2>8. Teknisk Bilaga &amp; Evidenskedja (Raw Data Audit Trail)</h2>
-    <p style="color:#475569;">Denna bilaga innehåller rådata, subdomäner, säkerhetsrubriker och fullständig spårbarhet för juridisk verifiering.</p>
+    <p style="color:#475569;">Denna bilaga innehåller rådata, subdomäner, säkerhetsrubriker samt kryptografisk verifiering för juridisk hälsa.</p>
+    <div class="mono" style="margin-bottom: 12px;">
+        <strong>Master SHA-256 Hash:</strong> {master_hash}
+    </div>
     {raw_sections}
 
     </body>
