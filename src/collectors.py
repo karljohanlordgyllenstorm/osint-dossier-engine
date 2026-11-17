@@ -3,7 +3,10 @@ from datetime import datetime, timezone
 import re
 import socket
 import ssl
+import urllib.parse
+import xml.etree.ElementTree as ET
 import aiohttp
+from bs4 import BeautifulSoup
 import dns.resolver
 from duckduckgo_search import DDGS
 import whois
@@ -21,6 +24,32 @@ def classify_target(target: str) -> dict:
   ):
     return {"type": "organization", "value": target}
   return {"type": "person", "value": target}
+
+
+def is_relevant_hit(result: dict, target: str, city: str = "") -> bool:
+  """Filtrerar bort skräpresultat genom att kräva att målets namn/ord finns i titel eller beskrivning."""
+  href = result.get("href", "").lower()
+  spam_domains = [
+      "answers.com",
+      "calculateme.com",
+      "salarycalculator.info",
+      "savvydollar.com",
+      "finatopia.com",
+      "pinterest.",
+  ]
+  if any(sd in href for sd in spam_domains):
+    return False
+
+  text = f"{result.get('title', '')} {result.get('body', '')}".lower()
+  tokens = [t.lower() for t in target.split() if len(t) > 2]
+  if not tokens:
+    return True
+
+  # Kräv att samtliga delar av namnet/målet förekommer i träffen
+  name_match = all(t in text for t in tokens)
+  if city and len(city.strip()) > 2:
+    return name_match and (city.strip().lower() in text)
+  return name_match
 
 
 def get_dns_records(domain: str) -> dict:
@@ -132,6 +161,55 @@ async def fetch_http_security_and_tech(
     return {"source": "http_headers_tech", "error": str(e), "data": {}}
 
 
+async def fetch_public_contacts_and_socials(
+    session: aiohttp.ClientSession, domain: str
+) -> dict:
+  """Extraherar publika e-postadresser, telefonnummer och sociala kanaler från domänen."""
+  url = f"https://{domain}"
+  social_domains = [
+      "linkedin.com",
+      "twitter.com",
+      "x.com",
+      "youtube.com",
+      "github.com",
+      "instagram.com",
+      "facebook.com",
+  ]
+  try:
+    async with session.get(url, timeout=10, allow_redirects=True) as resp:
+      if resp.status == 200:
+        html = await resp.text(errors="ignore")
+        soup = BeautifulSoup(html, "html.parser")
+
+        emails = set(
+            re.findall(
+                r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", html
+            )
+        )
+        clean_emails = [
+            e
+            for e in emails
+            if not e.lower().endswith((".png", ".jpg", ".svg", ".webp", ".gif"))
+        ]
+
+        socials = set()
+        for a in soup.find_all("a", href=True):
+          href = a["href"].strip()
+          if any(sd in href.lower() for sd in social_domains):
+            socials.add(href)
+
+        return {
+            "source": "public_contacts_socials",
+            "data": {
+                "emails": sorted(clean_emails)[:15],
+                "social_profiles": sorted(list(socials))[:20],
+            },
+        }
+  except Exception as e:
+    return {"source": "public_contacts_socials", "error": str(e), "data": {}}
+  return {"source": "public_contacts_socials", "data": {}}
+
+
 async def fetch_well_known_files(
     session: aiohttp.ClientSession, domain: str
 ) -> dict:
@@ -238,10 +316,55 @@ async def fetch_wayback(session: aiohttp.ClientSession, domain: str) -> dict:
   return {"source": "wayback", "urls": []}
 
 
-def search_ddg(query: str, max_results: int = 8) -> dict:
+async def fetch_google_news(
+    session: aiohttp.ClientSession, query: str, city: str = "", max_items: int = 8
+) -> dict:
+  """Hämtar färska nyhetsartiklar från Google News RSS."""
+  full_q = f'"{query}" "{city}"' if city else f'"{query}"'
+  encoded_q = urllib.parse.quote(full_q)
+  url = f"https://news.google.com/rss/search?q={encoded_q}&hl=sv&gl=SE&ceid=SE:sv"
+  try:
+    async with session.get(url, timeout=10) as resp:
+      if resp.status == 200:
+        xml_text = await resp.text()
+        root = ET.fromstring(xml_text)
+        articles = []
+        for item in root.findall(".//item")[:max_items]:
+          articles.append({
+              "title": item.findtext("title", ""),
+              "source": item.findtext("source", ""),
+              "published": item.findtext("pubDate", ""),
+              "url": item.findtext("link", ""),
+          })
+        return {"source": "google_news", "query": full_q, "articles": articles}
+  except Exception as e:
+    return {"source": "google_news", "error": str(e), "articles": []}
+  return {"source": "google_news", "articles": []}
+
+
+def search_youtube_presence(query: str, city: str = "", max_results: int = 6) -> dict:
+  """Söker efter publika YouTube-videor och framträdanden."""
   try:
     with DDGS() as ddgs:
-      results = list(ddgs.text(query, max_results=max_results))
+      city_q = f'"{city}"' if city else ""
+      q = f'"{query}" {city_q} site:youtube.com'
+      raw = list(ddgs.text(q, max_results=max_results))
+      filtered = [r for r in raw if is_relevant_hit(r, query, city)]
+      return {"source": "youtube_osint", "query": q, "results": filtered}
+  except Exception as e:
+    return {"source": "youtube_osint", "error": str(e), "results": []}
+
+
+def search_ddg(
+    query: str, filter_target: str = "", city: str = "", max_results: int = 8
+) -> dict:
+  try:
+    with DDGS() as ddgs:
+      raw = list(ddgs.text(query, max_results=max_results))
+      if filter_target:
+        results = [r for r in raw if is_relevant_hit(r, filter_target, city)]
+      else:
+        results = raw
       return {"source": "ddg_search", "query": query, "results": results}
   except Exception as e:
     return {"source": "ddg_search", "error": str(e), "results": []}
@@ -250,16 +373,22 @@ def search_ddg(query: str, max_results: int = 8) -> dict:
 async def fetch_company_business_data(
     session: aiohttp.ClientSession, company_name: str
 ) -> dict:
+  """Hämtar bokslut, omsättning, styrelsekopplingar och ägarstruktur från publika bolagsregister."""
   try:
     with DDGS() as ddgs:
       queries = [
-          f'"{company_name}" site:allabolag.se OR site:ratsit.se OR site:proff.se',
-          f'"{company_name}" omsättning resultat styrelse ägare',
+          f'"{company_name}" site:allabolag.se OR site:proff.se OR site:bolagsfakta.se',
+          f'"{company_name}" bokslut omsättning resultat styrelse VD',
       ]
       results = []
+      seen_urls = set()
       for q in queries:
-        res = list(ddgs.text(q, max_results=5))
-        results.extend(res)
+        res = list(ddgs.text(q, max_results=6))
+        for r in res:
+          href = r.get("href", "")
+          if href not in seen_urls and is_relevant_hit(r, company_name):
+            seen_urls.add(href)
+            results.append(r)
       return {
           "source": "company_intelligence",
           "query": company_name,
@@ -269,32 +398,35 @@ async def fetch_company_business_data(
     return {"source": "company_intelligence", "error": str(e), "results": []}
 
 
-async def fetch_person_socials_and_location(
+async def fetch_person_socials_and_connections(
     session: aiohttp.ClientSession, name: str, city: str = ""
 ) -> dict:
+  """Hämtar yrkesprofiler, bolagskopplingar och publika inlägg med strikt namnfiltrering."""
   try:
     with DDGS() as ddgs:
       city_query = f'"{city}"' if city else ""
       queries = [
           f'"{name}" {city_query} site:linkedin.com/in/',
-          f'"{name}" {city_query} site:github.com OR site:ratsit.se OR site:allabolag.se',
+          f'"{name}" {city_query} site:allabolag.se OR site:proff.se OR site:ratsit.se',
+          f'"{name}" {city_query} styrelse OR VD OR grundare OR befattning',
+          f'"{name}" {city_query} site:github.com OR site:x.com OR site:twitter.com',
       ]
 
       all_results = []
+      seen_urls = set()
       for q in queries:
-        res = list(ddgs.text(q, max_results=6))
+        res = list(ddgs.text(q, max_results=5))
         for r in res:
-          href = r.get("href", "").lower()
-          # Filtrera bort vanliga skräpsajter som ger orelevanta träffar
-          if "answers.com" in href or "calculateme.com" in href:
-            continue
-          all_results.append(r)
+          href = r.get("href", "")
+          if href not in seen_urls and is_relevant_hit(r, name, city):
+            seen_urls.add(href)
+            all_results.append(r)
 
       return {
           "source": "person_osint",
           "target_name": name,
           "city": city,
-          "results": all_results[:15],
+          "results": all_results[:18],
       }
   except Exception as e:
     return {"source": "person_osint", "error": str(e), "results": []}
@@ -306,33 +438,39 @@ async def collect_all_data(target: str, city: str = "") -> dict:
   results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
 
   async with aiohttp.ClientSession(
-      headers={"User-Agent": "OSINT-Dossier-Engine/1.1"}
+      headers={"User-Agent": "OSINT-Dossier-Engine/1.2"}
   ) as session:
     tasks = []
 
     if info["type"] == "domain":
       domain = info["value"]
+      base_name = domain.split(".")[0]
       tasks.append(fetch_crt_sh(session, domain))
       tasks.append(fetch_hackertarget_subs(session, domain))
       tasks.append(fetch_http_security_and_tech(session, domain))
+      tasks.append(fetch_public_contacts_and_socials(session, domain))
       tasks.append(fetch_well_known_files(session, domain))
       tasks.append(fetch_urlhaus(session, domain))
       tasks.append(fetch_wayback(session, domain))
+      tasks.append(fetch_google_news(session, base_name))
+      tasks.append(fetch_company_business_data(session, base_name))
       tasks.append(loop.run_in_executor(None, get_dns_records, domain))
       tasks.append(loop.run_in_executor(None, get_whois_info, domain))
       tasks.append(loop.run_in_executor(None, get_ssl_info, domain))
-      tasks.append(loop.run_in_executor(None, search_ddg, f"site:{domain}", 10))
+      tasks.append(
+          loop.run_in_executor(None, search_youtube_presence, base_name, "", 5)
+      )
+      tasks.append(
+          loop.run_in_executor(None, search_ddg, f"site:{domain}", "", "", 10)
+      )
       tasks.append(
           loop.run_in_executor(
               None,
               search_ddg,
               f"site:{domain} filetype:pdf OR filetype:xlsx OR filetype:docx",
+              "",
+              "",
               8,
-          )
-      )
-      tasks.append(
-          loop.run_in_executor(
-              None, search_ddg, f'"@{domain}" OR "{domain}" email', 8
           )
       )
 
@@ -349,45 +487,39 @@ async def collect_all_data(target: str, city: str = "") -> dict:
       tasks.append(fetch_internetdb(session, ip))
       tasks.append(fetch_ip_geo_and_asn(session, ip))
       tasks.append(fetch_urlhaus(session, ip))
-      tasks.append(loop.run_in_executor(None, search_ddg, f'"{ip}"', 10))
+      tasks.append(
+          loop.run_in_executor(None, search_ddg, f'"{ip}"', "", "", 10)
+      )
 
     elif info["type"] == "organization":
       org_val = info["value"]
       tasks.append(fetch_company_business_data(session, org_val))
+      tasks.append(fetch_google_news(session, org_val, city))
       tasks.append(
           loop.run_in_executor(
-              None,
-              search_ddg,
-              f'"{org_val}" site:allabolag.se OR site:ratsit.se OR site:proff.se',
-              10,
+              None, search_youtube_presence, org_val, city, 6
           )
       )
       tasks.append(
           loop.run_in_executor(
-              None, search_ddg, f'"{org_val}" styrelse OR ägare OR omsättning', 8
+              None,
+              search_ddg,
+              f'"{org_val}" site:linkedin.com/company/',
+              org_val,
+              "",
+              6,
           )
       )
 
     else:  # person
       person_val = info["value"]
       tasks.append(
-          fetch_person_socials_and_location(session, person_val, city)
+          fetch_person_socials_and_connections(session, person_val, city)
       )
-      city_str = f'"{city}"' if city else ""
+      tasks.append(fetch_google_news(session, person_val, city))
       tasks.append(
           loop.run_in_executor(
-              None,
-              search_ddg,
-              f'"{person_val}" {city_str} site:linkedin.com/in/',
-              10,
-          )
-      )
-      tasks.append(
-          loop.run_in_executor(
-              None,
-              search_ddg,
-              f'"{person_val}" {city_str} ratsit OR merinfo OR eniro',
-              8,
+              None, search_youtube_presence, person_val, city, 6
           )
       )
 
