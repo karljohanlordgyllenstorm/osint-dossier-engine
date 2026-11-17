@@ -68,41 +68,62 @@ def generate_pdf_dossier(
   youtube_html = ""
   raw_sections = ""
 
+  # Extrahering av finansiella nyckeltal (Omsättning, Resultat, Bokslut)
+  financial_rows = ""
+  fin_keywords = [
+      "omsättning",
+      "resultat",
+      "miljon",
+      "miljard",
+      "bokslut",
+      "intäkter",
+      "vinst",
+  ]
+
   for f in gathered.get("findings", []):
     src = f.get("source", "okänd")
 
     if src == "google_news":
       articles = f.get("articles", [])
       if articles:
-        items = "".join(
-            f"<li><strong>{html.escape(a.get('title',''))}</strong> "
-            f"<span style='color:#64748b;'>({html.escape(a.get('source',''))} — {html.escape(a.get('published',''))})</span><br>"
-            f"<span class='url-wrap'>{html.escape(a.get('url',''))}</span></li>"
-            for a in articles
-        )
+        items = ""
+        for a in articles:
+          title = a.get("title", "")
+          body_text = f"{title} {a.get('source', '')}"
+          # Kolla om artikeln innehåller finansiell information
+          if any(kw in body_text.lower() for kw in fin_keywords):
+            financial_rows += f"""
+                    <tr>
+                        <td><strong>{html.escape(a.get('source','Nyhet'))}</strong></td>
+                        <td>{html.escape(title)}</td>
+                        <td><span class='url-wrap'>{html.escape(a.get('url',''))}</span></td>
+                    </tr>
+                    """
+
+          items += f"<li><strong>{html.escape(title)}</strong> <span style='color:#64748b;'>({html.escape(a.get('source',''))} — {html.escape(a.get('published',''))})</span><br><span class='url-wrap'>{html.escape(a.get('url',''))}</span></li>"
         news_html += f"<ul>{items}</ul>"
 
-    elif src in ["company_intelligence", "person_osint", "official_registry"]:
+    elif src in ["company_intelligence", "official_registry"]:
       res = f.get("results", [])
       reg_data = f.get("registry_data")
-
       if res:
-        label = (
-            "Bolagsdata, Bokslut & Nyckeltal"
-            if src == "company_intelligence"
-            else (
-                "Officiella Registeruppgifter"
-                if src == "official_registry"
-                else "Personkopplingar & Styrelseroller"
-            )
+        items = ""
+        for r in res:
+          rtitle = r.get("title", "")
+          rbody = r.get("body", "")
+          if any(kw in f"{rtitle} {rbody}".lower() for kw in fin_keywords):
+            financial_rows += f"""
+                    <tr>
+                        <td><strong>Bolagsregister / Web</strong></td>
+                        <td>{html.escape(rtitle)}: {html.escape(rbody)}</td>
+                        <td><span class='url-wrap'>{html.escape(r.get('href',''))}</span></td>
+                    </tr>
+                    """
+          items += f"<li><strong>{html.escape(rtitle)}</strong><br><span class='url-wrap'>{html.escape(r.get('href',''))}</span><br><span style='color:#334155;'>{html.escape(rbody)}</span></li>"
+        company_person_html += (
+            f"<h3>Bolagsdata &amp; Register</h3><ul"
+            f" class='data-list'>{items}</ul>"
         )
-        items = "".join(
-            f"<li><strong>{html.escape(r.get('title',''))}</strong><br>"
-            f"<span class='url-wrap'>{html.escape(r.get('href',''))}</span><br>"
-            f"<span style='color:#334155;'>{html.escape(r.get('body',''))}</span></li>"
-            for r in res
-        )
-        company_person_html += f"<h3>{label}</h3><ul class='data-list'>{items}</ul>"
       elif reg_data:
         company_person_html += (
             f"<h3>Officiellt Register (API)</h3>"
@@ -144,17 +165,6 @@ def generate_pdf_dossier(
         </div>
         """
 
-    elif src == "youtube_osint":
-      vids = f.get("results", [])
-      if vids:
-        items = "".join(
-            f"<li><strong>{html.escape(v.get('title',''))}</strong><br>"
-            f"<span class='url-wrap'>{html.escape(v.get('href',''))}</span><br>"
-            f"<span style='color:#334155;'>{html.escape(v.get('body',''))}</span></li>"
-            for v in vids
-        )
-        youtube_html += f"<h3>YouTube-medieframträdanden</h3><ul class='data-list'>{items}</ul>"
-
     elif src == "crt.sh":
       subs = f.get("subdomains", [])
       raw_sections += (
@@ -168,33 +178,11 @@ def generate_pdf_dossier(
         raw_sections += f"<li><strong>{k}:</strong> {html.escape(', '.join(v) if v else 'Saknas')}</li>"
       raw_sections += "</ul>"
 
-    elif src == "http_headers_tech":
-      d = f.get("data", {})
-      raw_sections += "<h3>HTTP-säkerhet & Teknikstack</h3>"
-      raw_sections += f"<p><strong>Identifierad teknik:</strong> {html.escape(', '.join(d.get('detected_technologies', [])) or 'Okänd')}</p>"
-      raw_sections += f"<p><strong>Saknade säkerhetsrubriker:</strong> {html.escape(', '.join(d.get('missing_security_headers', [])) or 'Inga')}</p>"
-
-    elif src == "ddg_search":
-      res = f.get("results", [])
-      if res:
-        raw_sections += f"<h3>Sökmotorinventering ({html.escape(f.get('query', ''))})</h3><ul>"
-        for r in res[:10]:
-          raw_sections += f"<li><strong>{html.escape(r.get('title',''))}</strong><br><span class='url-wrap'>{html.escape(r.get('href',''))}</span><br><span style='color:#475569;'>{html.escape(r.get('body',''))}</span></li>"
-        raw_sections += "</ul>"
-
-  if not news_html:
-    news_html = "<p style='color:#64748b;'>Inga aktuella nyheter hittades.</p>"
-  if not company_person_html:
-    company_person_html = (
-        "<p style='color:#64748b;'>Inga bolagsdata eller registerkopplingar hittades.</p>"
-    )
-  if not diaries_property_html:
-    diaries_property_html = (
-        "<p style='color:#64748b;'>Inga publika diarier eller fastighetskopplingar hittades.</p>"
-    )
-  if not contacts_socials_html and not youtube_html:
-    contacts_socials_html = (
-        "<p style='color:#64748b;'>Inga publika kontakter hittades.</p>"
+  if not financial_rows:
+    financial_rows = (
+        "<tr><td colspan='3'>Inga direkta finansiella nyckeltal eller"
+        " omsättningsrapporter kunde extraheras automatiskt ur"
+        " sökresultaten.</td></tr>"
     )
 
   html_content = f"""
@@ -327,9 +315,6 @@ def generate_pdf_dossier(
             word-break: break-all;
             overflow-wrap: break-word;
         }}
-        .data-list li {{
-            margin-bottom: 8px;
-        }}
         .graph-box {{
             text-align: center;
             margin: 12px 0;
@@ -370,21 +355,34 @@ def generate_pdf_dossier(
     <h2>1. Executive Summary &amp; Juridisk Sammanfattning</h2>
     <div class="box">{html.escape(ai_res.get('executive_summary', ''))}</div>
 
-    <h2>2. Bolagsdata, Bokslut &amp; Officiella Register</h2>
+    <h2>2. Finansiella Nyckeltal, Omsättning &amp; Bokslut</h2>
+    <p style="color:#475569;">Automatiskt extraherade ekonomiska referenser och rapporter från öppna källor och nyhetsarkiv:</p>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th style="width:22%;">Källa / Medium</th>
+                <th style="width:53%;">Extraherad information / Rubrik</th>
+                <th style="width:25%;">Verifierbar URL</th>
+            </tr>
+        </thead>
+        <tbody>
+            {financial_rows}
+        </tbody>
+    </table>
+
+    <h2>3. Bolagsdata &amp; Officiella Register</h2>
     {company_person_html}
 
-    <h2>3. Officiella Diarier, Beslut &amp; Fastighetsregister</h2>
+    <h2>4. Officiella Diarier, Beslut &amp; Fastighetsregister</h2>
     {diaries_property_html}
 
-    <h2>4. Verifierad Mediebevakning</h2>
+    <h2>5. Verifierad Mediebevakning</h2>
     {news_html}
 
-    <h2>5. Sociala Kanaler &amp; Publika Kontakter</h2>
+    <h2>6. Sociala Kanaler &amp; Publika Kontakter</h2>
     {contacts_socials_html}
-    {youtube_html}
 
-    <h2>6. Exponerings- &amp; Riskanalys</h2>
-    <p>{html.escape(ai_res.get('technical_analysis', ''))}</p>
+    <h2>7. Exponerings- &amp; Riskanalys</h2>
     <table class="data-table">
         <thead>
             <tr>
@@ -397,24 +395,15 @@ def generate_pdf_dossier(
         <tbody>{findings_rows}</tbody>
     </table>
 
-    <h2>7. Visuell Relationskarta (Entity Graph)</h2>
+    <h2>8. Visuell Relationskarta (Entity Graph)</h2>
     <div class="graph-box">
         <img src="data:image/png;base64,{graph_b64}" alt="Entity Graph" />
     </div>
 
-    <h2>8. Rekommendationer för Fortsatt Utredning</h2>
+    <h2>9. Rekommendationer för Fortsatt Utredning</h2>
     <ul>{rec_items}</ul>
 
     <div class="page-break"></div>
-    <h2>9. Teknisk Bilaga &amp; Evidenskedja (Raw Data Audit Trail)</h2>
-    <p style="color:#475569;">Denna bilaga innehåller rådata, subdomäner, säkerhetsrubriker samt kryptografisk verifiering för juridisk hälsa.</p>
+    <h2>10. Teknisk Bilaga &amp; Evidenskedja (Raw Data Audit Trail)</h2>
     <div class="mono" style="margin-bottom: 12px;">
-        <strong>Master SHA-256 Hash:</strong> {master_hash}
-    </div>
-    {raw_sections}
-
-    </body>
-    </html>
-    """
-  HTML(string=html_content).write_pdf(output_pdf)
-  return output_pdf
+        <strong>Master SHA-256 Hash:</strong> {master
