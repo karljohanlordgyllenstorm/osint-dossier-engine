@@ -37,6 +37,8 @@ def classify_target(target: str) -> dict:
 def get_correct_domain(target: str) -> str:
   t = target.lower().strip()
   mapping = {
+      "skanska ab": "skanska.se",
+      "skanska": "skanska.se",
       "peab ab": "peab.se",
       "peab": "peab.se",
       "clas ohlson ab": "clasohlson.com",
