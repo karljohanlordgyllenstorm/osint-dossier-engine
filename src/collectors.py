@@ -4,6 +4,7 @@ import re
 import socket
 import ssl
 import time
+from typing import Any, Dict, List
 import urllib.parse
 import xml.etree.ElementTree as ET
 import aiohttp
@@ -53,6 +54,146 @@ def get_correct_domain(target: str) -> str:
       t.replace("ab", "").replace("publ", "").replace(".", "").replace(" ", "")
   )
   return f"{clean}.se"
+
+
+def extract_entities_from_news(
+    articles: List[Dict[str, Any]], company_name: str = ""
+) -> Dict[str, Any]:
+  """
+    Parsar titlar och eventuella sammanfattningar från insamlade nyhetsartiklar
+    för att extrahera nyckelpersoner, rollreferenser (VD/ledning) och belopp/omsättning.
+    """
+  stopwords = {
+      "Sverige",
+      "Stockholm",
+      "Göteborg",
+      "Malmö",
+      "Uppsala",
+      "Norrköping",
+      "Helsingborg",
+      "Kristianstad",
+      "Trelleborg",
+      "Lund",
+      "Partille",
+      "Umeå",
+      "Luleå",
+      "Polen",
+      "Warszawa",
+      "Cision",
+      "News",
+      "Via",
+      "Mynewsdesk",
+      "Nyheter",
+      "Affärsvärlden",
+      "Dagens",
+      "Industri",
+      "Svenska",
+      "Domstolen",
+      "Forbes",
+      "Axis",
+      "Communications",
+      "Skandia",
+      "Fastigheter",
+      "Industrivärden",
+      "Volvo",
+      "Mustaschkampen",
+      "Safe",
+      "International",
+      "Steel",
+      "Profil",
+      "Byggpartner",
+      "Anläggning",
+      "Studio",
+      "Sjöstaden",
+      "Valberedning",
+      "Halvårsrapport",
+      "Delårsrapport",
+      "Så",
+      "Ny",
+      "Nytt",
+      "Därför",
+      "Intäkten",
+      "Intäkterna",
+      "Negativt",
+      "Blufföretag",
+  }
+
+  for part in company_name.replace("AB", "").split():
+    stopwords.add(part.strip())
+
+  financial_pattern = re.compile(
+      r"((?:EUR|USD|SEK|kr)?\s*\d+(?:[.,]\d+)?\s*(?:miljoner|miljarder|mnkr|mdkr|msek|M|B)(?:\s*kronor)?)",
+      re.IGNORECASE,
+  )
+
+  role_pattern = re.compile(
+      r"\b(VD|verkställande direktör|koncernchef|styrelseordförande|ordförande|finanschef|CFO|CEO|valberedning|leder)\b",
+      re.IGNORECASE,
+  )
+
+  name_pattern = re.compile(
+      r"\b([A-ZÅÄÖ][a-zåäöéü-]{1,20}\s+[A-ZÅÄÖ][a-zåäöéü-]{1,25})\b"
+  )
+
+  extracted_people = []
+  extracted_roles = []
+  extracted_financials = []
+
+  seen_people = set()
+  seen_financials = set()
+
+  for article in articles:
+    title = article.get("title", "")
+    description = article.get("description", "")
+    clean_title = re.sub(r"\s+-\s+[^-]+$", "", title).strip()
+    text_to_scan = (
+        f"{clean_title}. {description}".strip() if description else clean_title
+    )
+    source = article.get("source", "")
+    published = article.get("published", "")
+    url = article.get("url", "")
+
+    for match in financial_pattern.findall(text_to_scan):
+      val = match.strip()
+      key = f"{val}|{clean_title}"
+      if key not in seen_financials:
+        seen_financials.add(key)
+        extracted_financials.append({
+            "amount": val,
+            "context": clean_title,
+            "source": source,
+            "published": published,
+            "url": url,
+        })
+
+    role_matches = role_pattern.findall(text_to_scan)
+    if role_matches:
+      extracted_roles.append({
+          "roles_mentioned": list(set(r.upper() for r in role_matches)),
+          "context": clean_title,
+          "source": source,
+          "published": published,
+          "url": url,
+      })
+
+    for candidate in name_pattern.findall(text_to_scan):
+      parts = candidate.split()
+      if not any(p in stopwords for p in parts):
+        if candidate not in seen_people:
+          seen_people.add(candidate)
+          extracted_people.append({
+              "name": candidate,
+              "context": clean_title,
+              "source": source,
+              "published": published,
+              "url": url,
+          })
+
+  return {
+      "people": extracted_people,
+      "executive_references": extracted_roles,
+      "financial_mentions": extracted_financials,
+  }
 
 
 def get_dns_records(domain: str) -> dict:
@@ -119,8 +260,15 @@ async def fetch_google_news(
         xml_text = await resp.text()
         root = ET.fromstring(xml_text)
         for item in root.findall(".//item")[:max_items]:
+          raw_desc = item.findtext("description", "")
+          clean_desc = (
+              BeautifulSoup(raw_desc, "html.parser").get_text(" ", strip=True)
+              if raw_desc
+              else ""
+          )
           articles.append({
               "title": item.findtext("title", ""),
+              "description": clean_desc,
               "source": item.findtext("source", ""),
               "published": item.findtext("pubDate", ""),
               "url": item.findtext("link", ""),
@@ -138,6 +286,7 @@ async def fetch_google_news(
         for n in news_res:
           articles.append({
               "title": n.get("title", ""),
+              "description": n.get("body", ""),
               "source": n.get("source", ""),
               "published": n.get("date", ""),
               "url": n.get("url", ""),
@@ -284,6 +433,55 @@ async def collect_all_data(target: str, city: str = "") -> dict:
         g if not isinstance(g, Exception) else {"source": "error", "error": str(g)}
         for g in gathered
     ]
+
+    # Hämta insamlade nyhetsartiklar och parsa entiteter
+    news_articles = []
+    for item in clean_gathered:
+      if item.get("source") == "google_news":
+        news_articles = item.get("articles", [])
+        break
+
+    parsed_entities = extract_entities_from_news(
+        news_articles, company_name=target
+    )
+
+    # Berika company_intelligence och person_osint med extraherade träffar från nyhetsflödet
+    for item in clean_gathered:
+      src = item.get("source")
+      if src == "company_intelligence":
+        item["parsed_financial_mentions"] = parsed_entities[
+            "financial_mentions"
+        ]
+        for fin in parsed_entities["financial_mentions"]:
+          item["results"].append({
+              "title": f"Finansiell uppgift ({fin['amount']}): {fin['context']}",
+              "href": fin["url"],
+              "body": f"Källa: {fin['source']} ({fin['published']})",
+          })
+      elif src == "person_osint":
+        item["parsed_people"] = parsed_entities["people"]
+        item["parsed_executive_references"] = parsed_entities[
+            "executive_references"
+        ]
+        for person in parsed_entities["people"]:
+          item["results"].append({
+              "title": f"Omnämnd person: {person['name']}",
+              "href": person["url"],
+              "body": f"{person['context']} — {person['source']} ({person['published']})",
+          })
+        for role in parsed_entities["executive_references"]:
+          roles_str = ", ".join(role["roles_mentioned"])
+          item["results"].append({
+              "title": f"Ledningsreferens ({roles_str}): {role['context']}",
+              "href": role["url"],
+              "body": f"Källa: {role['source']} ({role['published']})",
+          })
+
+    clean_gathered.append({
+        "source": "news_entity_extraction",
+        "data": parsed_entities,
+    })
+
     results["findings"] = clean_gathered
 
   return results
