@@ -1,6 +1,8 @@
 import base64
 from datetime import datetime, timezone
+import hashlib
 import html
+import json
 import os
 from weasyprint import HTML
 
@@ -25,13 +27,15 @@ def generate_pdf_dossier(
   ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
   graph_b64 = _img_to_base64(graph_path)
 
-  # Riskfärg
+  # Generera Master-hash för hela rapporten (Chain of Custody)
+  master_json = json.dumps(gathered, sort_keys=True, default=str)
+  master_hash = hashlib.sha256(master_json.encode("utf-8")).hexdigest()
+
   score = risk["total_score"]
   badge_color = (
       "#dc2626" if score >= 65 else ("#d97706" if score >= 35 else "#059669")
   )
 
-  # Bygg tabell för fynd
   findings_rows = ""
   for item in risk.get("findings_breakdown", []):
     sev_color = (
@@ -53,12 +57,10 @@ def generate_pdf_dossier(
         " identifierades.</td></tr>"
     )
 
-  # Åtgärdslista
   rec_items = "".join(
       f"<li>{html.escape(r)}</li>" for r in ai_res.get("recommendations", [])
   )
 
-  # Samla strukturerade block för de nya OSINT-sektionerna
   news_html = ""
   company_person_html = ""
   contacts_socials_html = ""
@@ -67,7 +69,6 @@ def generate_pdf_dossier(
 
   for f in gathered.get("findings", []):
     src = f.get("source", "okänd")
-
     if src == "google_news":
       articles = f.get("articles", [])
       if articles:
@@ -78,7 +79,6 @@ def generate_pdf_dossier(
             for a in articles
         )
         news_html += f"<ul>{items}</ul>"
-
     elif src in ["company_intelligence", "person_osint"]:
       res = f.get("results", [])
       if res:
@@ -94,13 +94,15 @@ def generate_pdf_dossier(
             for r in res
         )
         company_person_html += f"<h3>{label}</h3><ul>{items}</ul>"
-
     elif src == "public_contacts_socials":
       data = f.get("data", {})
       emails = data.get("emails", [])
       socials = data.get("social_profiles", [])
       if emails or socials:
-        e_str = ", ".join(html.escape(e) for e in emails) or "Inga publika e-postadresser hittades"
+        e_str = (
+            ", ".join(html.escape(e) for e in emails)
+            or "Inga publika e-postadresser hittades"
+        )
         s_items = "".join(
             f"<li>{html.escape(s)}</li>" for s in socials
         ) or "<li>Inga officiella sociala länkar hittades</li>"
@@ -111,7 +113,6 @@ def generate_pdf_dossier(
             <ul>{s_items}</ul>
         </div>
         """
-
     elif src == "youtube_osint":
       vids = f.get("results", [])
       if vids:
@@ -122,54 +123,40 @@ def generate_pdf_dossier(
             for v in vids
         )
         youtube_html += f"<h3>YouTube-videor & Medieframträdanden</h3><ul>{items}</ul>"
-
     elif src == "crt.sh":
       subs = f.get("subdomains", [])
       raw_sections += (
           f"<h3>Subdomäner (Certificate Transparency: {len(subs)} st)</h3>"
       )
-      raw_sections += (
-          f"<p class='mono'>{', '.join(html.escape(s) for s in subs[:60]) or 'Inga hittades'}</p>"
-      )
-
+      raw_sections += f"<p class='mono'>{', '.join(html.escape(s) for s in subs[:60]) or 'Inga hittades'}</p>"
     elif src == "dns":
       raw_sections += "<h3>DNS-poster</h3><ul>"
       for k, v in f.get("data", {}).items():
-        raw_sections += (
-            f"<li><strong>{k}:</strong> {html.escape(', '.join(v) if v else 'Saknas')}</li>"
-        )
+        raw_sections += f"<li><strong>{k}:</strong> {html.escape(', '.join(v) if v else 'Saknas')}</li>"
       raw_sections += "</ul>"
-
     elif src == "http_headers_tech":
       d = f.get("data", {})
       raw_sections += "<h3>HTTP-säkerhet & Teknikstack</h3>"
-      raw_sections += (
-          f"<p><strong>Identifierad teknik:</strong> {html.escape(', '.join(d.get('detected_technologies', [])) or 'Okänd')}</p>"
-      )
-      raw_sections += (
-          f"<p><strong>Saknade säkerhetsrubriker:</strong> {html.escape(', '.join(d.get('missing_security_headers', [])) or 'Inga')}</p>"
-      )
-
+      raw_sections += f"<p><strong>Identifierad teknik:</strong> {html.escape(', '.join(d.get('detected_technologies', [])) or 'Okänd')}</p>"
+      raw_sections += f"<p><strong>Saknade säkerhetsrubriker:</strong> {html.escape(', '.join(d.get('missing_security_headers', [])) or 'Inga')}</p>"
     elif src == "ddg_search":
       res = f.get("results", [])
       if res:
-        raw_sections += (
-            f"<h3>Sökmotorinventering ({html.escape(f.get('query', ''))})</h3><ul>"
-        )
+        raw_sections += f"<h3>Sökmotorinventering ({html.escape(f.get('query', ''))})</h3><ul>"
         for r in res[:10]:
-          raw_sections += (
-              f"<li><strong>{html.escape(r.get('title',''))}</strong> — "
-              f"<small>{html.escape(r.get('href',''))}</small><br>"
-              f"<span style='color:#475569;'>{html.escape(r.get('body',''))}</span></li>"
-          )
+          raw_sections += f"<li><strong>{html.escape(r.get('title',''))}</strong> — <small>{html.escape(r.get('href',''))}</small><br><span style='color:#475569;'>{html.escape(r.get('body',''))}</span></li>"
         raw_sections += "</ul>"
 
   if not news_html:
-    news_html = "<p style='color:#64748b;'>Inga aktuella nyhetsartiklar i Google News hittades för söktermen.</p>"
+    news_html = "<p style='color:#64748b;'>Inga aktuella nyheter hittades.</p>"
   if not company_person_html:
-    company_person_html = "<p style='color:#64748b;'>Inga relevanta bolags- eller personkopplingar kunde verifieras i öppna register.</p>"
+    company_person_html = (
+        "<p style='color:#64748b;'>Inga relevanta kopplingar hittades.</p>"
+    )
   if not contacts_socials_html and not youtube_html:
-    contacts_socials_html = "<p style='color:#64748b;'>Inga publika kontaktuppgifter, sociala medier eller YouTube-videor hittades.</p>"
+    contacts_socials_html = (
+        "<p style='color:#64748b;'>Inga publika kontakter hittades.</p>"
+    )
 
   html_content = f"""
     <!DOCTYPE html>
@@ -187,7 +174,7 @@ def generate_pdf_dossier(
                 color: #64748b;
             }}
             @bottom-left {{
-                content: "OSINT & INTELLIGENCE DOSSIER // {target_val}";
+                content: "LEGAL EVIDENCE DOSSIER // {target_val}";
                 font-family: 'Helvetica Neue', Arial, sans-serif;
                 font-size: 8pt;
                 color: #64748b;
@@ -209,7 +196,6 @@ def generate_pdf_dossier(
         .cover h1 {{
             margin: 0 0 8px 0;
             font-size: 21pt;
-            letter-spacing: 0.5px;
         }}
         .cover .subtitle {{
             color: #94a3b8;
@@ -311,32 +297,33 @@ def generate_pdf_dossier(
 
     <div class="cover">
         <div style="font-size:8.5pt; letter-spacing:1.5px; color:#38bdf8; font-weight:bold; margin-bottom:6px;">
-            OPEN SOURCE INTELLIGENCE &amp; ATTACK SURFACE REPORT
+            LEGAL-GRADE OSINT &amp; EVIDENCE DOSSIER
         </div>
-        <h1>OSINT Dossier: {target_val}</h1>
-        <div class="subtitle">Automatiserad insamling av bolagsdata, nyheter, digital närvaro och teknisk attackyta</div>
+        <h1>Dossier: {target_val}</h1>
+        <div class="subtitle">Verifierbar intelligens för juridisk prövning och due diligence</div>
         <table class="meta-grid">
             <tr>
                 <td><strong>Måltyp:</strong> {target_type}</td>
                 <td><strong>Upplöst IP:</strong> {resolved_ip}</td>
-                <td><strong>Genererad:</strong> {ts}</td>
+                <td><strong>Tidsstämpel (UTC):</strong> {ts}</td>
                 <td><strong>Risknivå:</strong> <span class="risk-badge">{risk['severity']} ({score}/100)</span></td>
             </tr>
         </table>
+        <div style="margin-top: 12px; font-size: 7.5pt; color: #94a3b8; font-family: monospace;">
+            Rapportens kryptografiska SHA-256 Hash (Chain of Custody): {master_hash}
+        </div>
     </div>
 
-    <h2>1. Executive Summary</h2>
-    <div class="box">
-        {html.escape(ai_res.get('executive_summary', ''))}
-    </div>
+    <h2>1. Executive Summary &amp; Juridisk Sammanfattning</h2>
+    <div class="box">{html.escape(ai_res.get('executive_summary', ''))}</div>
 
-    <h2>2. Bolagsdata, Bokslut &amp; Personkopplingar</h2>
+    <h2>2. Bolagsdata, Bokslut &amp; Officiella Register</h2>
     {company_person_html}
 
-    <h2>3. Google News &amp; Aktuell Mediebevakning</h2>
+    <h2>3. Verifierad Mediebevakning</h2>
     {news_html}
 
-    <h2>4. Sociala Medier, Kontaktuppgifter &amp; Video (YouTube)</h2>
+    <h2>4. Sociala Kanaler &amp; Publika Kontakter</h2>
     {contacts_socials_html}
     {youtube_html}
 
@@ -351,9 +338,7 @@ def generate_pdf_dossier(
                 <th style="width:10%; text-align:center;">Poäng</th>
             </tr>
         </thead>
-        <tbody>
-            {findings_rows}
-        </tbody>
+        <tbody>{findings_rows}</tbody>
     </table>
 
     <h2>6. Visuell Relationskarta (Entity Graph)</h2>
@@ -361,19 +346,16 @@ def generate_pdf_dossier(
         <img src="data:image/png;base64,{graph_b64}" alt="Entity Graph" />
     </div>
 
-    <h2>7. Prioriterade Rekommendationer</h2>
-    <ul>
-        {rec_items}
-    </ul>
+    <h2>7. Rekommendationer för Fortsatt Utredning</h2>
+    <ul>{rec_items}</ul>
 
     <div class="page-break"></div>
-    <h2>8. Teknisk Bilaga — Infrastrukturell Datainventering</h2>
-    <p style="color:#475569;">Detaljerad utskrift av identifierade subdomäner, DNS-poster, HTTP-säkerhetsrubriker och övriga tekniska sökningar.</p>
+    <h2>8. Teknisk Bilaga &amp; Evidenskedja (Raw Data Audit Trail)</h2>
+    <p style="color:#475569;">Denna bilaga innehåller rådata, subdomäner, säkerhetsrubriker och fullständig spårbarhet för juridisk verifiering.</p>
     {raw_sections}
 
     </body>
     </html>
     """
-
   HTML(string=html_content).write_pdf(output_pdf)
   return output_pdf
