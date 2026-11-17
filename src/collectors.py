@@ -14,7 +14,6 @@ import whois
 
 
 def normalize_target_name(target: str) -> str:
-  """Rensar och korrigerar vanliga stavfel eller format vid bolagssökning."""
   t = target.strip()
   if "ohlsson" in t.lower():
     t = re.sub(r"ohlsson", "ohlson", t, flags=re.IGNORECASE)
@@ -33,22 +32,6 @@ def classify_target(target: str) -> dict:
   ):
     return {"type": "organization", "value": target}
   return {"type": "person", "value": target}
-
-
-def is_relevant_hit(result: dict, target: str, city: str = "") -> bool:
-  """Tillåtande filtrering för att inte missa relevanta resultat."""
-  href = result.get("href", "").lower()
-  spam_domains = [
-      "answers.com",
-      "calculateme.com",
-      "salarycalculator.info",
-      "pinterest.",
-      "amazon.com",
-      "yelp.com",
-  ]
-  if any(sd in href for sd in spam_domains):
-    return False
-  return True
 
 
 def get_dns_records(domain: str) -> dict:
@@ -79,8 +62,26 @@ def get_whois_info(domain: str) -> dict:
     return {"source": "whois", "error": str(e), "data": {}}
 
 
+async def fetch_crt_sh(session: aiohttp.ClientSession, domain: str) -> dict:
+  url = f"https://crt.sh/?q=%.{domain}&output=json"
+  try:
+    async with session.get(url, timeout=15) as resp:
+      if resp.status == 200:
+        data = await resp.json(content_type=None)
+        subs = set()
+        for entry in data:
+          for name in entry.get("name_value", "").split("\n"):
+            name = name.strip().lower()
+            if name and "*" not in name:
+              subs.add(name)
+        return {"source": "crt.sh", "subdomains": sorted(list(subs))[:200]}
+  except Exception as e:
+    return {"source": "crt.sh", "error": str(e), "subdomains": []}
+  return {"source": "crt.sh", "subdomains": []}
+
+
 async def fetch_google_news(
-    session: aiohttp.ClientSession, query: str, city: str = "", max_items: int = 10
+    session: aiohttp.ClientSession, query: str, city: str = "", max_items: int = 12
 ) -> dict:
   full_q = f"{query} {city}".strip() if city else query.strip()
   encoded_q = urllib.parse.quote(full_q)
@@ -133,8 +134,9 @@ async def fetch_company_business_data(
     time.sleep(0.8)
     with DDGS() as ddgs:
       queries = [
-          f"{company_name} alla bolag proff bokslut",
-          f"{company_name} organisationsnummer styrelse VD omsättning",
+          f'"{company_name}" alla bolag OR proff OR allabolag.se OR proff.se',
+          f'"{company_name}" bokslut omsättning resultat styrelse VD dotterbolag',
+          f'"{company_name}" organisationsnummer ägare',
       ]
       results = []
       seen_urls = set()
@@ -142,7 +144,7 @@ async def fetch_company_business_data(
         time.sleep(0.8)
         res = list(
             ddgs.text(
-                q, region="se-se", safesearch="moderate", max_results=6
+                q, region="se-se", safesearch="moderate", max_results=8
             )
         )
         for r in res:
@@ -176,7 +178,7 @@ def fetch_public_diaries_and_properties(
         time.sleep(0.8)
         res = list(
             ddgs.text(
-                q, region="se-se", safesearch="moderate", max_results=5
+                q, region="se-se", safesearch="moderate", max_results=6
             )
         )
         for r in res:
@@ -204,9 +206,9 @@ def fetch_person_socials_and_connections(name: str, city: str = "") -> dict:
     with DDGS() as ddgs:
       city_query = f'"{city}"' if city else ""
       queries = [
-          f'"{name}" {city_query} linkedin OR facebook OR instagram OR x',
-          f'"{name}" {city_query} styrelse VD grundare profil',
-          f'"{name}" {city_query} medarbetare kontakt organisation',
+          f'"{name}" {city_query} site:linkedin.com/in/ OR site:linkedin.com/company/',
+          f'"{name}" {city_query} site:instagram.com OR site:x.com OR site:facebook.com',
+          f'"{name}" {city_query} styrelse VD grundare befattning medarbetare',
       ]
       all_results = []
       seen_urls = set()
@@ -226,7 +228,7 @@ def fetch_person_socials_and_connections(name: str, city: str = "") -> dict:
           "source": "person_osint",
           "target_name": name,
           "city": city,
-          "results": all_results[:15],
+          "results": all_results[:18],
       }
   except Exception as e:
     return {"source": "person_osint", "error": str(e), "results": []}
@@ -238,40 +240,39 @@ async def collect_all_data(target: str, city: str = "") -> dict:
   loop = asyncio.get_event_loop()
   results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
 
+  # Härled domännamn om målet är ett företagsnamn (ex. "Clas Ohlson AB" -> "clasohlson.com")
+  clean_domain = (
+      target.lower()
+      .replace("ab", "")
+      .replace("publ", "")
+      .replace(" ", "")
+      .strip()
+      + ".se"
+  )
+
   async with aiohttp.ClientSession(
-      headers={"User-Agent": "OSINT-Legal-Engine/2.0"}
+      headers={"User-Agent": "OSINT-Legal-Engine/2.5"}
   ) as session:
-    tasks = []
+    tasks = [
+        fetch_company_business_data(session, target),
+        fetch_google_news(session, target, city, max_items=12),
+        fetch_crt_sh(session, clean_domain),
+        loop.run_in_executor(
+            None, fetch_public_diaries_and_properties, target, city
+        ),
+        loop.run_in_executor(
+            None, fetch_person_socials_and_connections, target, city
+        ),
+        loop.run_in_executor(None, get_dns_records, clean_domain),
+        loop.run_in_executor(None, get_whois_info, clean_domain),
+    ]
 
-    if info["type"] == "organization":
-      org_val = info["value"]
-      tasks.append(fetch_company_business_data(session, org_val))
-      tasks.append(fetch_google_news(session, org_val, city, max_items=10))
-      tasks.append(
-          loop.run_in_executor(
-              None, fetch_public_diaries_and_properties, org_val, city
-          )
-      )
-      tasks.append(
-          loop.run_in_executor(
-              None, fetch_person_socials_and_connections, org_val, city
-          )
-      )
-    else:
-      val = info["value"]
-      tasks.append(
-          loop.run_in_executor(
-              None, fetch_person_socials_and_connections, val, city
-          )
-      )
-      tasks.append(fetch_google_news(session, val, city, max_items=10))
-      tasks.append(
-          loop.run_in_executor(
-              None, fetch_public_diaries_and_properties, val, city
-          )
-      )
-
-    gathered = await asyncio.gather(*tasks)
-    results["findings"] = gathered
+    gathered = await asyncio.gather(*tasks, return_exceptions=True)
+    # Rensa eventuella undantag så de inte kraschar pipelinen
+    clean_gathered = [
+        g if not isinstance(g, Exception) else {"source": "error", "error": str(g)}
+        for g in gathered
+    ]
+    results["findings"] = clean_gathered
 
   return results
