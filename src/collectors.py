@@ -81,7 +81,8 @@ def extract_entities_from_texts(
         "Bokslut", "Nyckeltal", "Styrelse", "Befattningshavare", "Verksamhet",
         "Kommun", "Omsorg", "Socialchef", "Black", "Friday", "Real", "Estate",
         "Tidningen", "Kuriren", "Wermlands", "Konsumentverket", "Ett", "Svidande",
-        # UI-skräp från Allabolag
+        "Warfvinges", "Väg", "Industrial", "Solutions", "Slussen", "Construction",
+        # UI-skräp
         "Sök", "Välj", "Segmentering", "Jämför", "Nätverkssökning", "Konkurser",
         "Topplistor", "Mer", "Sortering", "Relevans", "Bevaka", "Hitta",
         "Branschöversikt", "Produkter", "Logga", "Företag", "Hela", "Län"
@@ -96,7 +97,7 @@ def extract_entities_from_texts(
         re.IGNORECASE,
     )
     role_pattern = re.compile(
-        r"\b(VD|verkställande direktör|koncernchef|styrelseordförande|ordförande|finanschef|CFO|CEO|valberedning|socialchef)\b",
+        r"\b(VD|verkställande direktör|koncernchef|styrelseordförande|ordförande|finanschef|CFO|CEO|valberedning|socialchef|Executive Vice President|Senior Vice President)\b",
         re.IGNORECASE,
     )
     name_pattern = re.compile(
@@ -112,6 +113,13 @@ def extract_entities_from_texts(
     seen_financials = set()
 
     for item in items:
+        # VIKTIGT: Ignorera Allabolag-resultat vid person- och rollparsning för att slippa adresser och dotterbolag
+        if item.get("source") == "company_intelligence":
+            body_text = item.get("body", "")
+            for org_match in org_nr_pattern.findall(body_text):
+                extracted_org_nrs.add(org_match)
+            continue
+
         title = item.get("title", "")
         source = item.get("source", "")
         published = item.get("published", "")
@@ -320,6 +328,7 @@ async def fetch_allabolag_direct(
                 org_matches = re.findall(r"\b(55\d{4}-\d{4})\b", text)
                 if org_matches:
                     results.append({
+                        "source": "company_intelligence",
                         "title": f"Allabolag träff för {company_name}",
                         "href": url,
                         "body": text[:1500],
@@ -341,6 +350,7 @@ async def fetch_company_business_data(
     results = list(allabolag_hits)
     if wikidata_info:
         results.append({
+            "source": "company_intelligence",
             "title": f"Wikidata: {company_name}",
             "href": f"https://www.wikidata.org/wiki/{wikidata_info.get('wikidata_id', '')}",
             "body": str(wikidata_info),
