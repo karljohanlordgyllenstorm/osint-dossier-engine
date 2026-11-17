@@ -13,6 +13,14 @@ from duckduckgo_search import DDGS
 import whois
 
 
+def normalize_target_name(target: str) -> str:
+  """Rensar och korrigerar vanliga stavfel eller format vid bolagssökning."""
+  t = target.strip()
+  if "ohlsson" in t.lower():
+    t = re.sub(r"ohlsson", "ohlson", t, flags=re.IGNORECASE)
+  return t
+
+
 def classify_target(target: str) -> dict:
   target = target.strip()
   if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -28,17 +36,15 @@ def classify_target(target: str) -> dict:
 
 
 def is_relevant_hit(result: dict, target: str, city: str = "") -> bool:
-  """Tillåtande filtrering för att inte missa företagsrelaterade artiklar."""
+  """Tillåtande filtrering för att inte missa relevanta resultat."""
   href = result.get("href", "").lower()
   spam_domains = [
       "answers.com",
       "calculateme.com",
       "salarycalculator.info",
-      "savvydollar.com",
       "pinterest.",
       "amazon.com",
       "yelp.com",
-      "tripadvisor.com",
   ]
   if any(sd in href for sd in spam_domains):
     return False
@@ -123,12 +129,12 @@ async def fetch_google_news(
 async def fetch_company_business_data(
     session: aiohttp.ClientSession, company_name: str
 ) -> dict:
-  """Utökad bolagssökning som fångar upp allabolag, proff och finansiella nyckeltal."""
   try:
+    time.sleep(0.8)
     with DDGS() as ddgs:
       queries = [
-          f'"{company_name}" site:allabolag.se OR site:proff.se OR site:bolagsfakta.se',
-          f'"{company_name}" bokslut OR omsättning OR resultat OR styrelse OR VD',
+          f"{company_name} alla bolag proff bokslut",
+          f"{company_name} organisationsnummer styrelse VD omsättning",
       ]
       results = []
       seen_urls = set()
@@ -136,7 +142,7 @@ async def fetch_company_business_data(
         time.sleep(0.8)
         res = list(
             ddgs.text(
-                q, region="se-se", safesearch="moderate", max_results=8
+                q, region="se-se", safesearch="moderate", max_results=6
             )
         )
         for r in res:
@@ -198,9 +204,9 @@ def fetch_person_socials_and_connections(name: str, city: str = "") -> dict:
     with DDGS() as ddgs:
       city_query = f'"{city}"' if city else ""
       queries = [
-          f'"{name}" {city_query} site:linkedin.com/in/ OR site:linkedin.com/company/',
-          f'"{name}" {city_query} site:instagram.com OR site:x.com OR site:facebook.com',
-          f'"{name}" {city_query} styrelse OR VD OR grundare OR befattning',
+          f'"{name}" {city_query} linkedin OR facebook OR instagram OR x',
+          f'"{name}" {city_query} styrelse VD grundare profil',
+          f'"{name}" {city_query} medarbetare kontakt organisation',
       ]
       all_results = []
       seen_urls = set()
@@ -220,13 +226,14 @@ def fetch_person_socials_and_connections(name: str, city: str = "") -> dict:
           "source": "person_osint",
           "target_name": name,
           "city": city,
-          "results": all_results[:18],
+          "results": all_results[:15],
       }
   except Exception as e:
     return {"source": "person_osint", "error": str(e), "results": []}
 
 
 async def collect_all_data(target: str, city: str = "") -> dict:
+  target = normalize_target_name(target)
   info = classify_target(target)
   loop = asyncio.get_event_loop()
   results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
@@ -258,6 +265,11 @@ async def collect_all_data(target: str, city: str = "") -> dict:
           )
       )
       tasks.append(fetch_google_news(session, val, city, max_items=10))
+      tasks.append(
+          loop.run_in_executor(
+              None, fetch_public_diaries_and_properties, val, city
+          )
+      )
 
     gathered = await asyncio.gather(*tasks)
     results["findings"] = gathered
