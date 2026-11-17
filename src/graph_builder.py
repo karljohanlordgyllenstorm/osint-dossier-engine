@@ -5,68 +5,109 @@ import networkx as nx
 def build_entity_graph(
     gathered_data: dict, output_path: str = "entity_graph.png"
 ) -> str:
-  """Bygger och sparar en visuell entity-graf över måltavlans relationer."""
   G = nx.Graph()
-  target_val = gathered_data.get("target", {}).get("value", "Target")
-  G.add_node(target_val, color="#D9534F", size=1400, label=target_val)
+  target_val = gathered_data["target"]["value"]
+  G.add_node(target_val, category="target")
 
   resolved_ip = gathered_data.get("resolved_ip")
   if resolved_ip:
-    G.add_node(resolved_ip, color="#F0AD4E", size=900, label=resolved_ip)
+    G.add_node(resolved_ip, category="ip")
     G.add_edge(target_val, resolved_ip)
 
-  for item in gathered_data.get("findings", []):
-    source = item.get("source")
+  for f in gathered_data.get("findings", []):
+    src = f.get("source")
 
-    # Lägg till subdomäner (max 15 för att grafen ska förbli läsbar i PDF)
-    if source == "crt.sh":
-      for sub in item.get("subdomains", [])[:15]:
-        if sub != target_val:
-          G.add_node(sub, color="#5BC0DE", size=500, label=sub)
-          G.add_edge(target_val, sub)
+    if src == "crt.sh":
+      for sub in f.get("subdomains", [])[:12]:
+        G.add_node(sub, category="subdomain")
+        G.add_edge(target_val, sub)
 
-    # Lägg till öppna portar och CVE:er kopplade till IP
-    elif source == "internetdb":
-      data = item.get("data", {})
-      ip_node = data.get("ip") or resolved_ip or target_val
-      for port in data.get("ports", [])[:10]:
+    elif src == "dns":
+      for mx in f.get("data", {}).get("MX", [])[:4]:
+        clean_mx = mx.split()[-1].rstrip(".")
+        G.add_node(f"MX: {clean_mx}", category="dns")
+        G.add_edge(target_val, f"MX: {clean_mx}")
+      for ns in f.get("data", {}).get("NS", [])[:4]:
+        clean_ns = ns.rstrip(".")
+        G.add_node(f"NS: {clean_ns}", category="dns")
+        G.add_edge(target_val, f"NS: {clean_ns}")
+
+    elif src == "internetdb" and resolved_ip:
+      for port in f.get("data", {}).get("ports", [])[:10]:
         p_label = f"Port {port}"
-        G.add_node(p_label, color="#5CB85C", size=350, label=p_label)
-        G.add_edge(ip_node, p_label)
-      for cve in data.get("vulns", [])[:5]:
-        G.add_node(cve, color="#8E44AD", size=400, label=cve)
-        G.add_edge(ip_node, cve)
+        G.add_node(p_label, category="port")
+        G.add_edge(resolved_ip, p_label)
 
-    # Lägg till MX-servrar från DNS
-    elif source == "dns":
-      for mx in item.get("data", {}).get("MX", [])[:3]:
-        mx_clean = mx.split()[-1].rstrip(".")
-        G.add_node(mx_clean, color="#3498DB", size=450, label=f"MX: {mx_clean}")
-        G.add_edge(target_val, mx_clean)
+    elif src == "public_contacts_socials":
+      data = f.get("data", {})
+      for email in data.get("emails", [])[:5]:
+        G.add_node(email, category="contact")
+        G.add_edge(target_val, email)
+      for soc in data.get("social_profiles", [])[:6]:
+        short_soc = soc.replace("https://", "").replace("http://", "").split("?")[0][:32]
+        G.add_node(short_soc, category="social")
+        G.add_edge(target_val, short_soc)
 
-  plt.figure(figsize=(11, 7.5))
-  pos = nx.spring_layout(G, k=0.65, seed=42)
+    elif src == "google_news":
+      for art in f.get("articles", [])[:4]:
+        news_src = art.get("source") or "Nyhetsartikel"
+        label = f"News: {news_src[:25]}"
+        G.add_node(label, category="news")
+        G.add_edge(target_val, label)
 
-  colors = [nx.get_node_attributes(G, "color").get(n, "#95A5A6") for n in G.nodes()]
-  sizes = [nx.get_node_attributes(G, "size").get(n, 400) for n in G.nodes()]
-  labels = nx.get_node_attributes(G, "label")
+    elif src == "youtube_osint":
+      for vid in f.get("results", [])[:3]:
+        title = vid.get("title", "YouTube")[:28]
+        G.add_node(f"YT: {title}", category="media")
+        G.add_edge(target_val, f"YT: {title}")
 
-  nx.draw(
+    elif src in ["company_intelligence", "person_osint"]:
+      for item in f.get("results", [])[:8]:
+        title = item.get("title", "")[:30]
+        if title:
+          G.add_node(title, category="osint")
+          G.add_edge(target_val, title)
+
+  color_map = {
+      "target": "#0f172a",
+      "ip": "#2563eb",
+      "subdomain": "#0284c7",
+      "dns": "#059669",
+      "port": "#dc2626",
+      "contact": "#d97706",
+      "social": "#7c3aed",
+      "news": "#0891b2",
+      "media": "#e11d48",
+      "osint": "#4f46e5",
+  }
+  colors = [
+      color_map.get(G.nodes[n].get("category", "osint"), "#475569")
+      for n in G.nodes
+  ]
+
+  plt.figure(figsize=(12, 7.5), dpi=160)
+  pos = nx.spring_layout(G, k=0.95, iterations=50, seed=42)
+  nx.draw_networkx_nodes(
+      G, pos, node_color=colors, node_size=750, alpha=0.92
+  )
+  nx.draw_networkx_edges(G, pos, edge_color="#94a3b8", width=1.1, alpha=0.65)
+  nx.draw_networkx_labels(
       G,
       pos,
-      labels=labels,
-      with_labels=True,
-      node_color=colors,
-      node_size=sizes,
-      font_size=8,
+      font_size=7,
       font_weight="bold",
-      edge_color="#BDC3C7",
-      alpha=0.9,
+      bbox=dict(
+          boxstyle="round,pad=0.2", fc="white", ec="#cbd5e1", alpha=0.88
+      ),
   )
-
-  plt.title(f"OSINT Entity Graph — {target_val}", fontsize=14, fontweight="bold")
+  plt.title(
+      f"OSINT & Relationskarta — {target_val}",
+      fontsize=13,
+      fontweight="bold",
+      pad=12,
+  )
   plt.axis("off")
   plt.tight_layout()
-  plt.savefig(output_path, dpi=300, bbox_inches="tight")
+  plt.savefig(output_path, bbox_inches="tight")
   plt.close()
   return output_path
