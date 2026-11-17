@@ -468,7 +468,7 @@ async def fetch_bolagsverket_data(
   """Officiell registerintegration (Bolagsverket / öppna data)."""
   cleaned_query = company_name_or_orgnr.strip()
   headers = {
-      "User-Agent": "OSINT-Legal-Engine/1.8",
+      "User-Agent": "OSINT-Legal-Engine/1.9",
       "Accept": "application/json",
   }
   encoded_q = urllib.parse.quote(cleaned_query)
@@ -550,4 +550,133 @@ async def fetch_person_socials_and_connections(
           f'"{name}" {city_query} site:linkedin.com/in/',
           f'"{name}" {city_query} site:allabolag.se OR site:proff.se OR site:ratsit.se',
           f'"{name}" {city_query} styrelse OR VD OR grundare OR befattning',
-          f'"{name}" {city_query} site:github.com OR site:x.com OR site:twitter
+          f'"{name}" {city_query} site:github.com OR site:x.com OR site:twitter.com',
+      ]
+      all_results = []
+      seen_urls = set()
+      for q in queries:
+        time.sleep(0.8)
+        res = list(
+            ddgs.text(
+                q, region="se-se", safesearch="moderate", max_results=5
+            )
+        )
+        for r in res:
+          href = r.get("href", "")
+          if href not in seen_urls and is_relevant_hit(r, name, city):
+            seen_urls.add(href)
+            all_results.append(r)
+      return {
+          "source": "person_osint",
+          "target_name": name,
+          "city": city,
+          "results": all_results[:18],
+      }
+  except Exception as e:
+    return {"source": "person_osint", "error": str(e), "results": []}
+
+
+async def collect_all_data(target: str, city: str = "") -> dict:
+  info = classify_target(target)
+  loop = asyncio.get_event_loop()
+  results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+  async with aiohttp.ClientSession(
+      headers={"User-Agent": "OSINT-Legal-Engine/1.9"}
+  ) as session:
+    tasks = []
+
+    if info["type"] == "domain":
+      domain = info["value"]
+      base_name = domain.split(".")[0]
+      tasks.append(fetch_crt_sh(session, domain))
+      tasks.append(fetch_hackertarget_subs(session, domain))
+      tasks.append(fetch_http_security_and_tech(session, domain))
+      tasks.append(fetch_public_contacts_and_socials(session, domain))
+      tasks.append(fetch_well_known_files(session, domain))
+      tasks.append(fetch_urlhaus(session, domain))
+      tasks.append(fetch_wayback(session, domain))
+      tasks.append(fetch_google_news(session, base_name))
+      tasks.append(fetch_company_business_data(session, base_name))
+      tasks.append(
+          loop.run_in_executor(
+              None, fetch_public_diaries_and_properties, base_name, city
+          )
+      )
+      tasks.append(loop.run_in_executor(None, get_dns_records, domain))
+      tasks.append(loop.run_in_executor(None, get_whois_info, domain))
+      tasks.append(loop.run_in_executor(None, get_ssl_info, domain))
+      tasks.append(
+          loop.run_in_executor(None, search_youtube_presence, base_name, "", 5)
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None, search_ddg, f"site:{domain}", "", "", 10, domain
+          )
+      )
+
+      try:
+        ip = socket.gethostbyname(domain)
+        results["resolved_ip"] = ip
+        tasks.append(fetch_internetdb(session, ip))
+        tasks.append(fetch_ip_geo_and_asn(session, ip))
+      except socket.gaierror:
+        results["resolved_ip"] = None
+
+    elif info["type"] == "ip":
+      ip = info["value"]
+      tasks.append(fetch_internetdb(session, ip))
+      tasks.append(fetch_ip_geo_and_asn(session, ip))
+      tasks.append(fetch_urlhaus(session, ip))
+      tasks.append(
+          loop.run_in_executor(None, search_ddg, f'"{ip}"', "", "", 10, "")
+      )
+
+    elif info["type"] == "organization":
+      org_val = info["value"]
+      tasks.append(fetch_company_business_data(session, org_val))
+      tasks.append(fetch_bolagsverket_data(session, org_val))
+      tasks.append(
+          loop.run_in_executor(
+              None, fetch_public_diaries_and_properties, org_val, city
+          )
+      )
+      tasks.append(fetch_google_news(session, org_val, city))
+      tasks.append(
+          loop.run_in_executor(
+              None, search_youtube_presence, org_val, city, 6
+          )
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None,
+              search_ddg,
+              f'"{org_val}" site:linkedin.com/company/',
+              org_val,
+              "",
+              6,
+              "linkedin.com",
+          )
+      )
+
+    else:
+      person_val = info["value"]
+      tasks.append(
+          fetch_person_socials_and_connections(session, person_val, city)
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None, fetch_public_diaries_and_properties, person_val, city
+          )
+      )
+      tasks.append(fetch_google_news(session, person_val, city))
+      tasks.append(
+          loop.run_in_executor(
+              None, search_youtube_presence, person_val, city, 6
+          )
+      )
+
+    gathered = await asyncio.gather(*tasks)
+    results["findings"] = gathered
+
+  return results
