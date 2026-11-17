@@ -51,7 +51,6 @@ def get_correct_domain(target: str) -> str:
         if key in t:
             return domain
 
-    # Ta bort bolagsformer och översätt svenska tecken till ASCII
     clean = re.sub(r"\b(ab|publ|aktiebolag)\b", "", t)
     clean = clean.translate(str.maketrans("åäöéü", "aaoeu"))
     clean = re.sub(r"[^a-z0-9-]", "", clean)
@@ -84,10 +83,6 @@ async def safe_ddgs_text(query: str, max_results: int = 6) -> List[Dict[str, Any
 def extract_entities_from_texts(
     items: List[Dict[str, Any]], company_name: str = ""
 ) -> Dict[str, Any]:
-    """
-    Parsar titlar och sammanfattningar från både nyheter och sökresultat
-    för att extrahera organisationsnummer, nyckelpersoner, roller och belopp.
-    """
     stopwords = {
         "Sverige",
         "Stockholm",
@@ -241,7 +236,6 @@ def extract_entities_from_texts(
 def detect_official_domain(
     search_results: List[Dict[str, Any]], fallback_domain: str
 ) -> str:
-    """Försöker hitta bolagets faktiska webbplats i sökresultaten innan WHOIS/DNS körs."""
     ignored_hosts = {
         "allabolag.se",
         "ratsit.se",
@@ -424,7 +418,6 @@ async def fetch_person_socials_and_connections(
         f'"{company_name}" {city_query} site:linkedin.com/company/ OR site:linkedin.com/in/',
     ]
 
-    # Lägg till riktade sökningar på faktiska personer som hittats i Steg 1
     for person in discovered_people[:3]:
         queries.append(f'"{person}" "{company_name}" OR {city_query}'.strip())
 
@@ -452,7 +445,6 @@ async def collect_all_data(target: str, city: str = "") -> dict:
     target = normalize_target_name(target)
     info = classify_target(target)
 
-    # Försök extrahera stad automatiskt ur bolagsnamnet om city inte angivits
     if not city and info["type"] == "organization":
         first_word = target.split()[0]
         if first_word.lower() not in {"ab", "svenska", "nordiska", "nya"}:
@@ -468,6 +460,60 @@ async def collect_all_data(target: str, city: str = "") -> dict:
     async with aiohttp.ClientSession(
         headers={"User-Agent": "OSINT-Legal-Engine/2.6"}
     ) as session:
-        # STEG 1: Hämta grundläggande företagsdata & nyheter först för identitetsupplösning
         company_data, news_data = await asyncio.gather(
-            fetch_
+            fetch_company_business_data(target),
+            fetch_google_news(session, target, city, max_items=12),
+        )
+
+        combined_texts = company_data.get("results", []) + news_data.get("articles", [])
+        parsed_entities = extract_entities_from_texts(combined_texts, company_name=target)
+
+        org_nr = (
+            parsed_entities["org_numbers"][0]
+            if parsed_entities["org_numbers"]
+            else ""
+        )
+        discovered_names = [p["name"] for p in parsed_entities["people"]]
+        fallback_domain = get_correct_domain(target)
+        resolved_domain = detect_official_domain(
+            company_data.get("results", []), fallback_domain
+        )
+
+        results["resolved_identifiers"] = {
+            "org_number": org_nr or None,
+            "domain": resolved_domain,
+            "discovered_people": discovered_names,
+        }
+
+        tasks = [
+            fetch_crt_sh(session, resolved_domain),
+            fetch_public_diaries_and_properties(target, city, org_nr=org_nr),
+            fetch_person_socials_and_connections(target, discovered_names, city=city),
+            loop.run_in_executor(None, get_dns_records, resolved_domain),
+            loop.run_in_executor(None, get_whois_info, resolved_domain),
+        ]
+
+        step2_gathered = await asyncio.gather(*tasks, return_exceptions=True)
+        clean_step2 = [
+            g if not isinstance(g, Exception) else {"source": "error", "error": str(g)}
+            for g in step2_gathered
+        ]
+
+        company_data["org_numbers"] = parsed_entities["org_numbers"]
+        company_data["parsed_financial_mentions"] = parsed_entities["financial_mentions"]
+
+        for item in clean_step2:
+            if item.get("source") == "person_osint":
+                item["parsed_people"] = parsed_entities["people"]
+                item["parsed_executive_references"] = parsed_entities["executive_references"]
+
+        all_findings = [company_data, news_data] + clean_step2 + [
+            {
+                "source": "entity_extraction",
+                "data": parsed_entities,
+            }
+        ]
+
+        results["findings"] = all_findings
+
+    return results
