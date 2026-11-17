@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import re
 import socket
 import ssl
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 import aiohttp
@@ -36,6 +37,10 @@ def is_relevant_hit(result: dict, target: str, city: str = "") -> bool:
       "savvydollar.com",
       "finatopia.com",
       "pinterest.",
+      "amazon.com",
+      "yelp.com",
+      "tripadvisor.com",
+      "zoo.org",
   ]
   if any(sd in href for sd in spam_domains):
     return False
@@ -45,7 +50,6 @@ def is_relevant_hit(result: dict, target: str, city: str = "") -> bool:
   if not tokens:
     return True
 
-  # Kräv att samtliga delar av namnet/målet förekommer i träffen
   name_match = all(t in text for t in tokens)
   if city and len(city.strip()) > 2:
     return name_match and (city.strip().lower() in text)
@@ -164,7 +168,7 @@ async def fetch_http_security_and_tech(
 async def fetch_public_contacts_and_socials(
     session: aiohttp.ClientSession, domain: str
 ) -> dict:
-  """Extraherar publika e-postadresser, telefonnummer och sociala kanaler från domänen."""
+  """Extraherar publika e-postadresser och sociala kanaler från domänen."""
   url = f"https://{domain}"
   social_domains = [
       "linkedin.com",
@@ -342,29 +346,62 @@ async def fetch_google_news(
   return {"source": "google_news", "articles": []}
 
 
-def search_youtube_presence(query: str, city: str = "", max_results: int = 6) -> dict:
-  """Söker efter publika YouTube-videor och framträdanden."""
+def search_youtube_presence(
+    query: str, city: str = "", max_results: int = 6
+) -> dict:
+  """Söker efter publika YouTube-videor och framträdanden med strikt domän- och relevanskontroll."""
   try:
+    time.sleep(0.8)
     with DDGS() as ddgs:
       city_q = f'"{city}"' if city else ""
       q = f'"{query}" {city_q} site:youtube.com'
-      raw = list(ddgs.text(q, max_results=max_results))
-      filtered = [r for r in raw if is_relevant_hit(r, query, city)]
+      raw = list(
+          ddgs.text(
+              q,
+              region="se-se",
+              safesearch="moderate",
+              max_results=max_results,
+          )
+      )
+      filtered = [
+          r
+          for r in raw
+          if "youtube.com" in r.get("href", "").lower()
+          and is_relevant_hit(r, query, city)
+      ]
       return {"source": "youtube_osint", "query": q, "results": filtered}
   except Exception as e:
     return {"source": "youtube_osint", "error": str(e), "results": []}
 
 
 def search_ddg(
-    query: str, filter_target: str = "", city: str = "", max_results: int = 8
+    query: str,
+    filter_target: str = "",
+    city: str = "",
+    max_results: int = 8,
+    required_domain: str = "",
 ) -> dict:
+  """Utför webbsökning i svensk region med strikt filtrering mot rate-limiting och skräp."""
   try:
+    time.sleep(0.8)
     with DDGS() as ddgs:
-      raw = list(ddgs.text(query, max_results=max_results))
-      if filter_target:
-        results = [r for r in raw if is_relevant_hit(r, filter_target, city)]
-      else:
-        results = raw
+      raw = list(
+          ddgs.text(
+              query,
+              region="se-se",
+              safesearch="moderate",
+              max_results=max_results,
+          )
+      )
+      results = []
+      for r in raw:
+        href = r.get("href", "").lower()
+        if required_domain and required_domain.lower() not in href:
+          continue
+        if filter_target and not is_relevant_hit(r, filter_target, city):
+          continue
+        results.append(r)
+
       return {"source": "ddg_search", "query": query, "results": results}
   except Exception as e:
     return {"source": "ddg_search", "error": str(e), "results": []}
@@ -383,7 +420,12 @@ async def fetch_company_business_data(
       results = []
       seen_urls = set()
       for q in queries:
-        res = list(ddgs.text(q, max_results=6))
+        time.sleep(0.8)
+        res = list(
+            ddgs.text(
+                q, region="se-se", safesearch="moderate", max_results=6
+            )
+        )
         for r in res:
           href = r.get("href", "")
           if href not in seen_urls and is_relevant_hit(r, company_name):
@@ -415,7 +457,12 @@ async def fetch_person_socials_and_connections(
       all_results = []
       seen_urls = set()
       for q in queries:
-        res = list(ddgs.text(q, max_results=5))
+        time.sleep(0.8)
+        res = list(
+            ddgs.text(
+                q, region="se-se", safesearch="moderate", max_results=5
+            )
+        )
         for r in res:
           href = r.get("href", "")
           if href not in seen_urls and is_relevant_hit(r, name, city):
@@ -438,7 +485,7 @@ async def collect_all_data(target: str, city: str = "") -> dict:
   results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
 
   async with aiohttp.ClientSession(
-      headers={"User-Agent": "OSINT-Dossier-Engine/1.2"}
+      headers={"User-Agent": "OSINT-Dossier-Engine/1.3"}
   ) as session:
     tasks = []
 
@@ -461,7 +508,9 @@ async def collect_all_data(target: str, city: str = "") -> dict:
           loop.run_in_executor(None, search_youtube_presence, base_name, "", 5)
       )
       tasks.append(
-          loop.run_in_executor(None, search_ddg, f"site:{domain}", "", "", 10)
+          loop.run_in_executor(
+              None, search_ddg, f"site:{domain}", "", "", 10, domain
+          )
       )
       tasks.append(
           loop.run_in_executor(
@@ -471,6 +520,7 @@ async def collect_all_data(target: str, city: str = "") -> dict:
               "",
               "",
               8,
+              domain,
           )
       )
 
@@ -488,7 +538,7 @@ async def collect_all_data(target: str, city: str = "") -> dict:
       tasks.append(fetch_ip_geo_and_asn(session, ip))
       tasks.append(fetch_urlhaus(session, ip))
       tasks.append(
-          loop.run_in_executor(None, search_ddg, f'"{ip}"', "", "", 10)
+          loop.run_in_executor(None, search_ddg, f'"{ip}"', "", "", 10, "")
       )
 
     elif info["type"] == "organization":
@@ -508,6 +558,7 @@ async def collect_all_data(target: str, city: str = "") -> dict:
               org_val,
               "",
               6,
+              "linkedin.com",
           )
       )
 
