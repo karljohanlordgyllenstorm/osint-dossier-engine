@@ -1,368 +1,379 @@
-from datetime import datetime
+import base64
+from datetime import datetime, timezone
+import html
 import os
-from jinja2 import Template
 from weasyprint import HTML
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="sv">
-<head>
-<meta charset="UTF-8">
-<style>
-  @page {
-    size: A4;
-    margin: 2cm 1.8cm;
-    @top-right {
-      content: "OSINT DOSSIER // {{ target }}";
-      font-size: 8pt;
-      color: #7F8C8D;
-    }
-    @bottom-left {
-      content: "KONFIDENTIELLT — GENERERAD {{ date }}";
-      font-size: 8pt;
-      color: #7F8C8D;
-    }
-    @bottom-right {
-      content: "Sida " counter(page) " av " counter(pages);
-      font-size: 8pt;
-      color: #7F8C8D;
-    }
-  }
-  @page :first {
-    @top-right { content: normal; }
-    @bottom-left { content: normal; }
-    @bottom-right { content: normal; }
-  }
-  body {
-    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-    color: #2C3E50;
-    line-height: 1.5;
-    font-size: 10pt;
-  }
-  .page-break { page-break-before: always; }
-  .cover-page {
-    text-align: left;
-    padding-top: 120px;
-  }
-  .badge {
-    display: inline-block;
-    padding: 6px 14px;
-    background-color: #2C3E50;
-    color: #FFFFFF;
-    font-weight: bold;
-    font-size: 9pt;
-    letter-spacing: 1px;
-    border-radius: 3px;
-  }
-  .cover-title {
-    font-size: 28pt;
-    font-weight: bold;
-    margin: 20px 0 10px 0;
-    color: #1A252F;
-  }
-  .cover-subtitle {
-    font-size: 14pt;
-    color: #5D6D7E;
-    margin-bottom: 40px;
-  }
-  .score-box {
-    border-left: 6px solid #D9534F;
-    background: #F8F9F9;
-    padding: 20px;
-    margin-top: 30px;
-  }
-  h1 {
-    font-size: 16pt;
-    color: #1A252F;
-    border-bottom: 2px solid #2C3E50;
-    padding-bottom: 5px;
-    margin-top: 0;
-  }
-  h2 {
-    font-size: 12pt;
-    color: #2980B9;
-    margin-top: 18px;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 15px 0;
-    font-size: 9pt;
-  }
-  th, td {
-    border: 1px solid #D5D8DC;
-    padding: 8px 10px;
-    text-align: left;
-    vertical-align: top;
-  }
-  th {
-    background-color: #2C3E50;
-    color: #FFFFFF;
-  }
-  tr:nth-child(even) { background-color: #F8F9F9; }
-  .bar-bg {
-    width: 100%;
-    background-color: #E5E8E8;
-    height: 10px;
-    border-radius: 4px;
-  }
-  .bar-fill {
-    height: 10px;
-    background-color: #2980B9;
-    border-radius: 4px;
-  }
-  .graph-img {
-    width: 100%;
-    max-height: 480px;
-    object-fit: contain;
-    border: 1px solid #D5D8DC;
-    margin-top: 10px;
-  }
-  .rec-card {
-    background: #F4F6F7;
-    border-left: 4px solid #2980B9;
-    padding: 12px 15px;
-    margin-bottom: 12px;
-  }
-  code {
-    background: #EAECEE;
-    padding: 2px 5px;
-    border-radius: 3px;
-    font-size: 8.5pt;
-  }
-  .osint-card {
-    background: #F8F9F9;
-    border: 1px solid #D5D8DC;
-    padding: 10px 14px;
-    margin-bottom: 10px;
-    border-radius: 4px;
-  }
-</style>
-</head>
-<body>
 
-<!-- SIDA 1: TITELSIDA -->
-<div class="cover-page">
-  <div class="badge">OSINT & ATTACK SURFACE DOSSIER</div>
-  <div class="cover-title">{{ target }}</div>
-  <div class="cover-subtitle">Automatiserad underrättelse- och exponeringsrapport</div>
-
-  <table>
-    <tr><th>Måltavla</th><td>{{ target }} (Typ: {{ target_type }})</td></tr>
-    <tr><th>Upplöst IP-adress</th><td>{{ resolved_ip or 'Ej tillämpligt / Person eller Företag' }}</td></tr>
-    <tr><th>Rapportdatum</th><td>{{ date }}</td></tr>
-    <tr><th>Antal analyserade källor</th><td>{{ sources_count }} moduler</td></tr>
-  </table>
-
-  <div class="score-box">
-    <div style="font-size: 11pt; color: #5D6D7E;">TOTAL RISKPOÄNG</div>
-    <div style="font-size: 26pt; font-weight: bold; color: #C0392B;">{{ total_score }} / 100 — {{ severity }}</div>
-  </div>
-</div>
-
-<!-- SIDA 2: EXECUTIVE SUMMARY & PRIORITERADE ÅTGÄRDER -->
-<div class="page-break">
-  <h1>1. Executive Summary</h1>
-  <p>{{ ai.executive_summary }}</p>
-
-  <h2>Top 3 Prioriterade Åtgärder</h2>
-  {% for rec in ai.top_recommendations %}
-  <div class="rec-card">
-    <strong>[{{ rec.priority }}] {{ rec.title }}</strong><br>
-    <span>{{ rec.action }}</span>
-  </div>
-  {% endfor %}
-</div>
-
-<!-- SIDA 3: RISKMATRIS -->
-<div class="page-break">
-  <h1>2. Riskmatris (7 Kategorier)</h1>
-  <p>Riskpoängen beräknas deterministiskt utifrån viktade tekniska och öppna signaler.</p>
-  <table>
-    <thead>
-      <tr>
-        <th>Kategori</th>
-        <th>Vikt</th>
-        <th>Poäng</th>
-        <th>Visualisering</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for key, cat in categories.items() %}
-      <tr>
-        <td><strong>{{ category_names[key] }}</strong></td>
-        <td>{{ (cat.weight * 100)|int }}%</td>
-        <td><strong>{{ cat.score }}/100</strong></td>
-        <td>
-          <div class="bar-bg"><div class="bar-fill" style="width: {{ cat.score }}%;"></div></div>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-
-<!-- SIDA 4: ENTITY-GRAF -->
-<div class="page-break">
-  <h1>3. Entity-graf & Infrastrukturrelationer</h1>
-  <p>Grafen illustrerar kopplingar mellan måltavlan, subdomäner, IP-adresser och exponerade portar.</p>
-  {% if graph_path %}
-    <img src="file://{{ graph_path }}" class="graph-img" alt="Entity Graph">
-  {% else %}
-    <p><em>Ingen graf kunde genereras för denna måltavla.</em></p>
-  {% endif %}
-</div>
-
-<!-- SIDA 5: DEDIKERAD SEKTION FÖRETAG & PERSON OSINT -->
-<div class="page-break">
-  <h1>4. Företags- & Personprofilering (Business & People OSINT)</h1>
-  <p>Resultat från riktade sökningar efter ägare, styrelse, finansiella nyckeltal eller personers sociala profiler.</p>
-
-  {% set found_biz_or_person = false %}
-  {% for item in findings_raw %}
-    {% if item.source == 'company_intelligence' or item.source == 'person_osint' %}
-      {% set found_biz_or_person = true %}
-      <h2>Träffar från modul: <code>{{ item.source }}</code></h2>
-      {% if item.target_name %}
-        <p><strong>Sökobjekt:</strong> {{ item.target_name }} {% if item.city %}(Ort: {{ item.city }}){% endif %}</p>
-      {% endif %}
-      {% if item.results %}
-        {% for r in item.results %}
-          <div class="osint-card">
-            <strong>{{ r.title }}</strong><br>
-            <a href="{{ r.href }}" style="color: #2980B9; font-size: 8.5pt;">{{ r.href }}</a><br>
-            <span>{{ r.body }}</span>
-          </div>
-        {% endfor %}
-      {% else %}
-        <p>Inga publika träffar hittades för denna kategori.</p>
-      {% endif %}
-    {% endif %}
-  {% endfor %}
-
-  {% if not found_biz_or_person %}
-    <p><em>Ingen specifik företags- eller personprofilering utfördes för detta mål (eller så angavs en domän/IP).</em></p>
-  {% endif %}
-</div>
-
-<!-- SIDA 6+: DETALJERADE FINDINGS PER KATEGORI -->
-{% for key, cat in categories.items() %}
-<div class="page-break">
-  <h1>5.{{ loop.index }} Detaljerad Analys: {{ category_names[key] }}</h1>
-  <p><strong>Kategoripoäng:</strong> {{ cat.score }} / 100 (Vikt: {{ (cat.weight * 100)|int }}%)</p>
-  <h2>Identifierade observationer</h2>
-  {% if cat.findings %}
-    <ul>
-      {% for f in cat.findings %}
-        <li>{{ f }}</li>
-      {% endfor %}
-    </ul>
-  {% else %}
-    <p>Inga avvikande risksignaler noterades i denna kategori vid skanningstillfället.</p>
-  {% endif %}
-</div>
-{% endfor %}
-
-<!-- ACH-MATRIS -->
-<div class="page-break">
-  <h1>6. ACH-matris (Analysis of Competing Hypotheses)</h1>
-  <p>Strukturerad utvärdering av konkurrerande hypoteser baserat på insamlad OSINT-evidens.</p>
-  <table>
-    <thead>
-      <tr>
-        <th>Hypotes</th>
-        <th>Stödjande evidens</th>
-        <th>Motsägande evidens</th>
-        <th>Sannolikhet</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in ai.ach_matrix %}
-      <tr>
-        <td><strong>{{ row.hypothesis }}</strong></td>
-        <td>{{ row.supporting_evidence }}</td>
-        <td>{{ row.contradicting_evidence }}</td>
-        <td><strong>{{ row.likelihood }}</strong></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-
-<!-- APPENDIX: FULLSTÄNDIG RÅDATA & TEKNISK INVENTERING -->
-<div class="page-break">
-  <h1>7. Teknisk Bilaga — Fullständig Datainventering</h1>
-  <p>Detaljerad utskrift av identifierade subdomäner, DNS-poster, HTTP-säkerhetsrubriker och publika träffar.</p>
-
-  {% for item in findings_raw %}
-    <h2>Källa: {{ item.source }}</h2>
-    {% if item.subdomains %}
-      <p><strong>Totalt {{ item.subdomains|length }} subdomäner:</strong><br>
-      <code>{{ item.subdomains|join(', ') }}</code></p>
-    {% elif item.hosts %}
-      <ul>
-        {% for h in item.hosts %}<li><code>{{ h[0] }}</code> → {{ h[1] }}</li>{% endfor %}
-      </ul>
-    {% elif item.urls %}
-      <ul>
-        {% for u in item.urls[:25] %}<li><code>{{ u }}</code></li>{% endfor %}
-      </ul>
-    {% elif item.results %}
-      <p><em>Sökfråga: {{ item.query }}</em></p>
-      <ul>
-        {% for r in item.results %}
-          <li><strong>{{ r.title }}</strong> — <code>{{ r.href }}</code><br>{{ r.body }}</li>
-        {% endfor %}
-      </ul>
-    {% elif item.data %}
-      <table>
-        {% for k, v in item.data.items() %}
-          <tr><th style="width: 30%;">{{ k }}</th><td><code>{{ v }}</code></td></tr>
-        {% endfor %}
-      </table>
-    {% endif %}
-  {% endfor %}
-</div>
-
-</body>
-</html>
-"""
+def _img_to_base64(path: str) -> str:
+  if not path or not os.path.exists(path):
+    return ""
+  with open(path, "rb") as f:
+    return base64.b64encode(f.read()).decode("utf-8")
 
 
 def generate_pdf_dossier(
-    gathered_data: dict,
-    risk_report: dict,
-    ai_analysis: dict,
+    gathered: dict,
+    risk: dict,
+    ai_res: dict,
     graph_path: str,
     output_pdf: str = "osint_dossier.pdf",
 ) -> str:
-  category_names = {
-      "network_services": "Nätverk & Exponerade Tjänster",
-      "email_phishing": "E-post & Phishing-surface",
-      "subdomain_hygiene": "Subdomän & Infrastruktur-hygien",
-      "credential_leaks": "Credential & Data Leaks",
-      "code_exposure": "Kod & Utvecklar-exponering",
-      "digital_footprint": "Digitalt Fotavtryck & Social Engineering",
-      "reputation_news": "Rykte, Nyheter & Juridik",
-  }
+  target_val = html.escape(gathered["target"]["value"])
+  target_type = html.escape(gathered["target"]["type"].upper())
+  resolved_ip = html.escape(str(gathered.get("resolved_ip") or "Ej applicerbart"))
+  ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+  graph_b64 = _img_to_base64(graph_path)
 
-  template = Template(HTML_TEMPLATE)
-  html_out = template.render(
-      target=gathered_data.get("target", {}).get("value", "Okänd"),
-      target_type=gathered_data.get("target", {}).get("type", "okänd"),
-      resolved_ip=gathered_data.get("resolved_ip"),
-      date=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
-      sources_count=len(gathered_data.get("findings", [])),
-      total_score=risk_report.get("total_score", 0),
-      severity=risk_report.get("severity", "OKÄND"),
-      categories=risk_report.get("categories", {}),
-      category_names=category_names,
-      ai=ai_analysis,
-      graph_path=os.path.abspath(graph_path)
-      if graph_path and os.path.exists(graph_path)
-      else None,
-      findings_raw=gathered_data.get("findings", []),
+  # Riskfärg
+  score = risk["total_score"]
+  badge_color = (
+      "#dc2626" if score >= 65 else ("#d97706" if score >= 35 else "#059669")
   )
 
-  HTML(string=html_out).write_pdf(output_pdf)
+  # Bygg tabell för fynd
+  findings_rows = ""
+  for item in risk.get("findings_breakdown", []):
+    sev_color = (
+        "#dc2626"
+        if item["severity"] in ["KRITISK", "HÖG"]
+        else ("#d97706" if item["severity"] == "MEDEL" else "#0284c7")
+    )
+    findings_rows += f"""
+        <tr>
+            <td><span class="sev-pill" style="background:{sev_color};">{html.escape(item['severity'])}</span></td>
+            <td><strong>{html.escape(item['category'])}</strong></td>
+            <td>{html.escape(item['title'])}<br><small style="color:#475569;">{html.escape(item['detail'])}</small></td>
+            <td style="text-align:center;">+{item['points']}</td>
+        </tr>
+        """
+  if not findings_rows:
+    findings_rows = (
+        "<tr><td colspan='4'>Inga förhöjda riskindikatorer"
+        " identifierades.</td></tr>"
+    )
+
+  # Åtgärdslista
+  rec_items = "".join(
+      f"<li>{html.escape(r)}</li>" for r in ai_res.get("recommendations", [])
+  )
+
+  # Samla strukturerade block för de nya OSINT-sektionerna
+  news_html = ""
+  company_person_html = ""
+  contacts_socials_html = ""
+  youtube_html = ""
+  raw_sections = ""
+
+  for f in gathered.get("findings", []):
+    src = f.get("source", "okänd")
+
+    if src == "google_news":
+      articles = f.get("articles", [])
+      if articles:
+        items = "".join(
+            f"<li><strong>{html.escape(a.get('title',''))}</strong> "
+            f"<span style='color:#64748b;'>({html.escape(a.get('source',''))} — {html.escape(a.get('published',''))})</span><br>"
+            f"<small style='color:#0284c7;'>{html.escape(a.get('url',''))}</small></li>"
+            for a in articles
+        )
+        news_html += f"<ul>{items}</ul>"
+
+    elif src in ["company_intelligence", "person_osint"]:
+      res = f.get("results", [])
+      if res:
+        label = (
+            "Bokslut, Nyckeltal & Bolagsregister"
+            if src == "company_intelligence"
+            else "Personkopplingar, Styrelseroller & Profiler"
+        )
+        items = "".join(
+            f"<li><strong>{html.escape(r.get('title',''))}</strong> — "
+            f"<small style='color:#0284c7;'>{html.escape(r.get('href',''))}</small><br>"
+            f"<span style='color:#334155;'>{html.escape(r.get('body',''))}</span></li>"
+            for r in res
+        )
+        company_person_html += f"<h3>{label}</h3><ul>{items}</ul>"
+
+    elif src == "public_contacts_socials":
+      data = f.get("data", {})
+      emails = data.get("emails", [])
+      socials = data.get("social_profiles", [])
+      if emails or socials:
+        e_str = ", ".join(html.escape(e) for e in emails) or "Inga publika e-postadresser hittades"
+        s_items = "".join(
+            f"<li>{html.escape(s)}</li>" for s in socials
+        ) or "<li>Inga officiella sociala länkar hittades</li>"
+        contacts_socials_html += f"""
+        <div class="box">
+            <p><strong>Publika e-postadresser:</strong> {e_str}</p>
+            <p><strong>Identifierade sociala kanaler:</strong></p>
+            <ul>{s_items}</ul>
+        </div>
+        """
+
+    elif src == "youtube_osint":
+      vids = f.get("results", [])
+      if vids:
+        items = "".join(
+            f"<li><strong>{html.escape(v.get('title',''))}</strong> — "
+            f"<small style='color:#0284c7;'>{html.escape(v.get('href',''))}</small><br>"
+            f"<span style='color:#334155;'>{html.escape(v.get('body',''))}</span></li>"
+            for v in vids
+        )
+        youtube_html += f"<h3>YouTube-videor & Medieframträdanden</h3><ul>{items}</ul>"
+
+    elif src == "crt.sh":
+      subs = f.get("subdomains", [])
+      raw_sections += (
+          f"<h3>Subdomäner (Certificate Transparency: {len(subs)} st)</h3>"
+      )
+      raw_sections += (
+          f"<p class='mono'>{', '.join(html.escape(s) for s in subs[:60]) or 'Inga hittades'}</p>"
+      )
+
+    elif src == "dns":
+      raw_sections += "<h3>DNS-poster</h3><ul>"
+      for k, v in f.get("data", {}).items():
+        raw_sections += (
+            f"<li><strong>{k}:</strong> {html.escape(', '.join(v) if v else 'Saknas')}</li>"
+        )
+      raw_sections += "</ul>"
+
+    elif src == "http_headers_tech":
+      d = f.get("data", {})
+      raw_sections += "<h3>HTTP-säkerhet & Teknikstack</h3>"
+      raw_sections += (
+          f"<p><strong>Identifierad teknik:</strong> {html.escape(', '.join(d.get('detected_technologies', [])) or 'Okänd')}</p>"
+      )
+      raw_sections += (
+          f"<p><strong>Saknade säkerhetsrubriker:</strong> {html.escape(', '.join(d.get('missing_security_headers', [])) or 'Inga')}</p>"
+      )
+
+    elif src == "ddg_search":
+      res = f.get("results", [])
+      if res:
+        raw_sections += (
+            f"<h3>Sökmotorinventering ({html.escape(f.get('query', ''))})</h3><ul>"
+        )
+        for r in res[:10]:
+          raw_sections += (
+              f"<li><strong>{html.escape(r.get('title',''))}</strong> — "
+              f"<small>{html.escape(r.get('href',''))}</small><br>"
+              f"<span style='color:#475569;'>{html.escape(r.get('body',''))}</span></li>"
+          )
+        raw_sections += "</ul>"
+
+  if not news_html:
+    news_html = "<p style='color:#64748b;'>Inga aktuella nyhetsartiklar i Google News hittades för söktermen.</p>"
+  if not company_person_html:
+    company_person_html = "<p style='color:#64748b;'>Inga relevanta bolags- eller personkopplingar kunde verifieras i öppna register.</p>"
+  if not contacts_socials_html and not youtube_html:
+    contacts_socials_html = "<p style='color:#64748b;'>Inga publika kontaktuppgifter, sociala medier eller YouTube-videor hittades.</p>"
+
+  html_content = f"""
+    <!DOCTYPE html>
+    <html lang="sv">
+    <head>
+    <meta charset="UTF-8">
+    <style>
+        @page {{
+            size: A4;
+            margin: 18mm 16mm 18mm 16mm;
+            @bottom-right {{
+                content: "Sida " counter(page) " av " counter(pages);
+                font-family: 'Helvetica Neue', Arial, sans-serif;
+                font-size: 8pt;
+                color: #64748b;
+            }}
+            @bottom-left {{
+                content: "OSINT & INTELLIGENCE DOSSIER // {target_val}";
+                font-family: 'Helvetica Neue', Arial, sans-serif;
+                font-size: 8pt;
+                color: #64748b;
+            }}
+        }}
+        body {{
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            color: #1e293b;
+            line-height: 1.48;
+            font-size: 9.5pt;
+        }}
+        .cover {{
+            background: #0f172a;
+            color: #ffffff;
+            padding: 36px 32px;
+            border-radius: 6px;
+            margin-bottom: 24px;
+        }}
+        .cover h1 {{
+            margin: 0 0 8px 0;
+            font-size: 21pt;
+            letter-spacing: 0.5px;
+        }}
+        .cover .subtitle {{
+            color: #94a3b8;
+            font-size: 10.5pt;
+            margin-bottom: 22px;
+        }}
+        .meta-grid {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }}
+        .meta-grid td {{
+            padding: 8px 10px;
+            background: #1e293b;
+            border: 1px solid #334155;
+            font-size: 9pt;
+        }}
+        h2 {{
+            color: #0f172a;
+            border-bottom: 2px solid #0f172a;
+            padding-bottom: 4px;
+            margin-top: 22px;
+            font-size: 13pt;
+            page-break-after: avoid;
+        }}
+        h3 {{
+            color: #334155;
+            font-size: 10.5pt;
+            margin-top: 14px;
+            margin-bottom: 6px;
+            page-break-after: avoid;
+        }}
+        .box {{
+            background: #f8fafc;
+            border-left: 4px solid #2563eb;
+            padding: 12px 15px;
+            margin: 12px 0;
+            border-radius: 0 4px 4px 0;
+        }}
+        .risk-badge {{
+            display: inline-block;
+            background: {badge_color};
+            color: #fff;
+            font-weight: bold;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 10pt;
+        }}
+        table.data-table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 8.8pt;
+        }}
+        table.data-table th {{
+            background: #0f172a;
+            color: #fff;
+            text-align: left;
+            padding: 7px 8px;
+        }}
+        table.data-table td {{
+            border-bottom: 1px solid #cbd5e1;
+            padding: 7px 8px;
+            vertical-align: top;
+        }}
+        .sev-pill {{
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 7.5pt;
+            font-weight: bold;
+            display: inline-block;
+        }}
+        .mono {{
+            font-family: 'Courier New', monospace;
+            font-size: 8pt;
+            background: #f1f5f9;
+            padding: 8px;
+            border-radius: 4px;
+            word-wrap: break-word;
+        }}
+        .graph-box {{
+            text-align: center;
+            margin: 14px 0;
+            page-break-inside: avoid;
+        }}
+        .graph-box img {{
+            max-width: 100%;
+            max-height: 360px;
+            border: 1px solid #cbd5e1;
+            border-radius: 4px;
+        }}
+        .page-break {{
+            page-break-before: always;
+        }}
+    </style>
+    </head>
+    <body>
+
+    <div class="cover">
+        <div style="font-size:8.5pt; letter-spacing:1.5px; color:#38bdf8; font-weight:bold; margin-bottom:6px;">
+            OPEN SOURCE INTELLIGENCE &amp; ATTACK SURFACE REPORT
+        </div>
+        <h1>OSINT Dossier: {target_val}</h1>
+        <div class="subtitle">Automatiserad insamling av bolagsdata, nyheter, digital närvaro och teknisk attackyta</div>
+        <table class="meta-grid">
+            <tr>
+                <td><strong>Måltyp:</strong> {target_type}</td>
+                <td><strong>Upplöst IP:</strong> {resolved_ip}</td>
+                <td><strong>Genererad:</strong> {ts}</td>
+                <td><strong>Risknivå:</strong> <span class="risk-badge">{risk['severity']} ({score}/100)</span></td>
+            </tr>
+        </table>
+    </div>
+
+    <h2>1. Executive Summary</h2>
+    <div class="box">
+        {html.escape(ai_res.get('executive_summary', ''))}
+    </div>
+
+    <h2>2. Bolagsdata, Bokslut &amp; Personkopplingar</h2>
+    {company_person_html}
+
+    <h2>3. Google News &amp; Aktuell Mediebevakning</h2>
+    {news_html}
+
+    <h2>4. Sociala Medier, Kontaktuppgifter &amp; Video (YouTube)</h2>
+    {contacts_socials_html}
+    {youtube_html}
+
+    <h2>5. Exponerings- &amp; Riskanalys</h2>
+    <p>{html.escape(ai_res.get('technical_analysis', ''))}</p>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th style="width:14%;">Allvarlighet</th>
+                <th style="width:20%;">Kategori</th>
+                <th style="width:56%;">Fynd &amp; Detaljer</th>
+                <th style="width:10%; text-align:center;">Poäng</th>
+            </tr>
+        </thead>
+        <tbody>
+            {findings_rows}
+        </tbody>
+    </table>
+
+    <h2>6. Visuell Relationskarta (Entity Graph)</h2>
+    <div class="graph-box">
+        <img src="data:image/png;base64,{graph_b64}" alt="Entity Graph" />
+    </div>
+
+    <h2>7. Prioriterade Rekommendationer</h2>
+    <ul>
+        {rec_items}
+    </ul>
+
+    <div class="page-break"></div>
+    <h2>8. Teknisk Bilaga — Infrastrukturell Datainventering</h2>
+    <p style="color:#475569;">Detaljerad utskrift av identifierade subdomäner, DNS-poster, HTTP-säkerhetsrubriker och övriga tekniska sökningar.</p>
+    {raw_sections}
+
+    </body>
+    </html>
+    """
+
+  HTML(string=html_content).write_pdf(output_pdf)
   return output_pdf
