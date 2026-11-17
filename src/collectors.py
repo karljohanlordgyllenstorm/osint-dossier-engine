@@ -323,16 +323,22 @@ async def fetch_wayback(session: aiohttp.ClientSession, domain: str) -> dict:
 async def fetch_google_news(
     session: aiohttp.ClientSession, query: str, city: str = "", max_items: int = 8
 ) -> dict:
-  """Hämtar färska nyhetsartiklar från Google News RSS."""
-  full_q = f'"{query}" "{city}"' if city else f'"{query}"'
+  """Hämtar färska nyhetsartiklar från Google News RSS med fallback till DDG News."""
+  full_q = f"{query} {city}".strip() if city else query.strip()
   encoded_q = urllib.parse.quote(full_q)
   url = f"https://news.google.com/rss/search?q={encoded_q}&hl=sv&gl=SE&ceid=SE:sv"
+  headers = {
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      )
+  }
+  articles = []
   try:
-    async with session.get(url, timeout=10) as resp:
+    async with session.get(url, headers=headers, timeout=10) as resp:
       if resp.status == 200:
         xml_text = await resp.text()
         root = ET.fromstring(xml_text)
-        articles = []
         for item in root.findall(".//item")[:max_items]:
           articles.append({
               "title": item.findtext("title", ""),
@@ -340,10 +346,28 @@ async def fetch_google_news(
               "published": item.findtext("pubDate", ""),
               "url": item.findtext("link", ""),
           })
-        return {"source": "google_news", "query": full_q, "articles": articles}
-  except Exception as e:
-    return {"source": "google_news", "error": str(e), "articles": []}
-  return {"source": "google_news", "articles": []}
+  except Exception:
+    pass
+
+  # Fallback om Google News RSS blockerar Colab-IP:n eller returnerar 0 träffar
+  if not articles:
+    try:
+      time.sleep(0.8)
+      with DDGS() as ddgs:
+        news_res = list(
+            ddgs.news(full_q, region="se-se", max_results=max_items)
+        )
+        for n in news_res:
+          articles.append({
+              "title": n.get("title", ""),
+              "source": n.get("source", ""),
+              "published": n.get("date", ""),
+              "url": n.get("url", ""),
+          })
+    except Exception as e:
+      return {"source": "google_news", "error": str(e), "articles": []}
+
+  return {"source": "google_news", "query": full_q, "articles": articles}
 
 
 def search_youtube_presence(
@@ -485,7 +509,7 @@ async def collect_all_data(target: str, city: str = "") -> dict:
   results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
 
   async with aiohttp.ClientSession(
-      headers={"User-Agent": "OSINT-Dossier-Engine/1.3"}
+      headers={"User-Agent": "OSINT-Dossier-Engine/1.4"}
   ) as session:
     tasks = []
 
