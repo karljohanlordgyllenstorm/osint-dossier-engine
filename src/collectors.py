@@ -63,10 +63,7 @@ def get_correct_domain(target: str) -> str:
 
 
 def parse_allabolag_structured_block(body_text: str) -> List[Dict[str, Any]]:
-    """Extraherar strukturerad bolagsdata direkt från Allabolag-texten."""
     companies = []
-    # Delar upp texten baserat på organisationsteman eller kända mönster
-    # Vi söker efter block som matchar företagsnamn följt av Org.nr
     chunks = re.split(r"(?=[A-ZÅÄÖa-zåäö\s]+AB\s+Org\.nr|Org\.nr\s+\d{6}-\d{4})", body_text)
     
     for chunk in chunks:
@@ -75,20 +72,15 @@ def parse_allabolag_structured_block(body_text: str) -> List[Dict[str, Any]]:
             continue
             
         org_nr = org_match.group(1)
-        
-        # Försök hitta namn (första raden eller orden innan Org.nr)
         name_match = re.search(r"^([A-ZÅÄÖ][A-Za-zåäöÅÄÖ\s,-]+AB)", chunk.strip())
         name = name_match.group(1).strip() if name_match else "Okänt bolag"
         
-        # Omsättning
         rev_match = re.search(r"Omsättning\s+\d{4}\s+([\d\s]+)", chunk)
         revenue = rev_match.group(1).strip() if rev_match else None
         
-        # Anställda
         emp_match = re.search(r"Anställda\s+(\d+)", chunk)
         employees = emp_match.group(1) if emp_match else None
         
-        # VD / Befattningshavare
         vd_match = re.search(r"(?:Extern verkställande direktör|Verkställande direktör)\s+([A-ZÅÄÖa-zåäö\s]+?)(?=\s+(?:Byggmästare|VVS|Entreprenörer|Järnväg|Betong|Fastighetsbolag|IT|Datacenters|Jämför|Bevaka|Hitta)|$)", chunk)
         vd = vd_match.group(1).strip() if vd_match else None
         
@@ -123,7 +115,6 @@ def extract_entities_from_texts(
         "Kommun", "Omsorg", "Socialchef", "Black", "Friday", "Real", "Estate",
         "Tidningen", "Kuriren", "Wermlands", "Konsumentverket", "Ett", "Svidande",
         "Warfvinges", "Väg", "Industrial", "Solutions", "Slussen", "Construction",
-        # UI-skräp
         "Sök", "Välj", "Segmentering", "Jämför", "Nätverkssökning", "Konkurser",
         "Topplistor", "Mer", "Sortering", "Relevans", "Bevaka", "Hitta",
         "Branschöversikt", "Produkter", "Logga", "Företag", "Hela", "Län"
@@ -411,7 +402,6 @@ async def fetch_company_business_data(
 async def fetch_public_diaries_and_properties(
     session: aiohttp.ClientSession, target_name: str, city: str = "", org_nr: str = ""
 ) -> dict:
-    """Breddade och mer robusta sökningar efter myndighetsbeslut, tvister och tillsyn."""
     id_part = f' OR "{org_nr}"' if org_nr else ""
     queries = [
         f'"{target_name}"{id_part} (tillsyn OR beslut OR domstol OR polisanmäl* OR misskötsel)',
@@ -423,7 +413,6 @@ async def fetch_public_diaries_and_properties(
         res = await fetch_google_news(session, q, city="", max_items=5)
         all_articles.extend(res.get("articles", []))
         
-    # Ta bort dubbletter baserat på URL
     unique_articles = {a["url"]: a for a in all_articles}.values()
 
     return {
@@ -457,7 +446,6 @@ async def fetch_person_socials_and_connections(
 
 
 def generate_markdown_report(data: dict) -> str:
-    """Genererar en strukturerad bakgrunds- och riskrapport i Markdown utifrån JSON-resultatet."""
     target_info = data.get("target", {})
     identifiers = data.get("resolved_identifiers", {})
     findings = data.get("findings", [])
@@ -467,7 +455,6 @@ def generate_markdown_report(data: dict) -> str:
     domain = identifiers.get("domain", "Ej tillgängligt")
     people = identifiers.get("discovered_people", [])
     
-    # Extrahera finansiella nämnda poster och strukturerad bolagsdata
     financials = []
     structured_subs = []
     regulatory_articles = []
@@ -501,9 +488,9 @@ def generate_markdown_report(data: dict) -> str:
     report.append("\n---")
     report.append("## 2. Ekonomi & Större Affärer")
     if financials:
-        report.append("Relevanta finansiella transaktioner och projekt som hittats i nyhetsflödet:")
+        report.append("Relevanta finansiella transaktioner och projekt som hittades i nyhetsflödet:")
         for fin in financials[:5]:
-            report.append(- f" **{fin.get('amount')}**: {fin.get('context')} (*Källa: {fin.get('source')}*)")
+            report.append(f"- **{fin.get('amount')}**: {fin.get('context')} (*Källa: {fin.get('source')}*)")
     else:
         report.append("Inga specifika finansiella belopp noterades.")
 
@@ -543,4 +530,63 @@ async def collect_all_data(target: str, city: str = "") -> dict:
     async with aiohttp.ClientSession(headers=BROWSER_HEADERS) as session:
         company_data, news_data = await asyncio.gather(
             fetch_company_business_data(session, target),
-            fetch_
+            fetch_google_news(session, target, city=city, max_items=12),
+        )
+
+        combined_texts = company_data.get("results", []) + news_data.get("articles", [])
+        parsed_entities = extract_entities_from_texts(combined_texts, company_name=target)
+
+        direct_orgs = []
+        for r in company_data.get("results", []):
+            direct_orgs.extend(r.get("matched_org_numbers", []))
+        all_orgs = list(dict.fromkeys(direct_orgs + parsed_entities["org_numbers"]))
+        parsed_entities["org_numbers"] = all_orgs
+        org_nr = all_orgs[0] if all_orgs else ""
+
+        wikidata_site = company_data.get("wikidata", {}).get("official_website", "")
+        if wikidata_site:
+            resolved_domain = urllib.parse.urlparse(wikidata_site).netloc.lower().removeprefix("www.")
+        else:
+            resolved_domain = get_correct_domain(target)
+
+        discovered_names = [p["name"] for p in parsed_entities["people"]]
+
+        results["resolved_identifiers"] = {
+            "org_number": org_nr or None,
+            "domain": resolved_domain,
+            "discovered_people": discovered_names,
+        }
+
+        tasks = [
+            fetch_crt_sh(session, resolved_domain),
+            fetch_public_diaries_and_properties(session, target, city=city, org_nr=org_nr),
+            fetch_person_socials_and_connections(session, target, discovered_names, city=city),
+            loop.run_in_executor(None, get_dns_records, resolved_domain),
+            loop.run_in_executor(None, get_whois_info, resolved_domain),
+        ]
+
+        step2_gathered = await asyncio.gather(*tasks, return_exceptions=True)
+        clean_step2 = [
+            g if not isinstance(g, Exception) else {"source": "error", "error": str(g)}
+            for g in step2_gathered
+        ]
+
+        company_data["org_numbers"] = all_orgs
+        company_data["parsed_financial_mentions"] = parsed_entities["financial_mentions"]
+
+        for item in clean_step2:
+            if item.get("source") == "person_osint":
+                item["parsed_people"] = parsed_entities["people"]
+                item["parsed_executive_references"] = parsed_entities["executive_references"]
+
+        all_findings = [company_data, news_data] + clean_step2 + [
+            {
+                "source": "entity_extraction",
+                "data": parsed_entities,
+            }
+        ]
+
+        results["findings"] = all_findings
+        results["markdown_report"] = generate_markdown_report(results)
+
+    return results
