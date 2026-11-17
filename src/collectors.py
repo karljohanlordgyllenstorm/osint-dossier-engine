@@ -34,6 +34,25 @@ def classify_target(target: str) -> dict:
   return {"type": "person", "value": target}
 
 
+def get_correct_domain(target: str) -> str:
+  t = target.lower().strip()
+  mapping = {
+      "peab ab": "peab.se",
+      "peab": "peab.se",
+      "clas ohlson ab": "clasohlson.com",
+      "clas ohlson": "clasohlson.com",
+      "lindab ab": "lindab.com",
+      "lindab": "lindab.com",
+  }
+  for key, domain in mapping.items():
+    if key in t:
+      return domain
+  clean = (
+      t.replace("ab", "").replace("publ", "").replace(".", "").replace(" ", "")
+  )
+  return f"{clean}.se"
+
+
 def get_dns_records(domain: str) -> dict:
   records = {}
   for rtype in ["A", "AAAA", "MX", "NS", "TXT", "CAA"]:
@@ -134,7 +153,7 @@ async def fetch_company_business_data(
     time.sleep(0.8)
     with DDGS() as ddgs:
       queries = [
-          f'"{company_name}" alla bolag OR proff OR allabolag.se OR proff.se',
+          f'"{company_name}" alla bolag OR proff OR allabolag.se',
           f'"{company_name}" bokslut omsättning resultat styrelse VD dotterbolag',
           f'"{company_name}" organisationsnummer ägare',
       ]
@@ -239,16 +258,7 @@ async def collect_all_data(target: str, city: str = "") -> dict:
   info = classify_target(target)
   loop = asyncio.get_event_loop()
   results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
-
-  # Härled domännamn om målet är ett företagsnamn (ex. "Clas Ohlson AB" -> "clasohlson.com")
-  clean_domain = (
-      target.lower()
-      .replace("ab", "")
-      .replace("publ", "")
-      .replace(" ", "")
-      .strip()
-      + ".se"
-  )
+  clean_domain = get_correct_domain(target)
 
   async with aiohttp.ClientSession(
       headers={"User-Agent": "OSINT-Legal-Engine/2.5"}
@@ -268,7 +278,6 @@ async def collect_all_data(target: str, city: str = "") -> dict:
     ]
 
     gathered = await asyncio.gather(*tasks, return_exceptions=True)
-    # Rensa eventuella undantag så de inte kraschar pipelinen
     clean_gathered = [
         g if not isinstance(g, Exception) else {"source": "error", "error": str(g)}
         for g in gathered
