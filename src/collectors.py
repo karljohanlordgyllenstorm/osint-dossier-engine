@@ -64,7 +64,7 @@ def get_correct_domain(target: str) -> str:
 
 def parse_allabolag_structured_block(body_text: str) -> List[Dict[str, Any]]:
     companies = []
-    chunks = re.split(r"(?=[A-ZÅÄÖa-zåäö\s]+AB\s+Org\.nr|Org\.nr\s+\d{6}-\d{4})", body_text)
+    chunks = re.split(r"(?=[A-ZÅÄÖa-zåäö\s,-]+AB\s+(?:Org\.nr|Stockholm|Förslöv))", body_text)
     
     for chunk in chunks:
         org_match = re.search(r"\b(55\d{4}-\d{4}|212000-\d{4})\b", chunk)
@@ -72,8 +72,8 @@ def parse_allabolag_structured_block(body_text: str) -> List[Dict[str, Any]]:
             continue
             
         org_nr = org_match.group(1)
-        name_match = re.search(r"^([A-ZÅÄÖ][A-Za-zåäöÅÄÖ\s,-]+AB)", chunk.strip())
-        name = name_match.group(1).strip() if name_match else "Okänt bolag"
+        name_match = re.search(r"([A-ZÅÄÖ][A-Za-zåäöÅÄÖ\s,-]+AB)", chunk)
+        raw_name = name_match.group(1).strip() if name_match else "Bolag"
         
         rev_match = re.search(r"Omsättning\s+\d{4}\s+([\d\s]+)", chunk)
         revenue = rev_match.group(1).strip() if rev_match else None
@@ -85,7 +85,7 @@ def parse_allabolag_structured_block(body_text: str) -> List[Dict[str, Any]]:
         vd = vd_match.group(1).strip() if vd_match else None
         
         companies.append({
-            "name": name,
+            "name": raw_name,
             "org_number": org_nr,
             "revenue_2025": revenue,
             "employees": employees,
@@ -115,6 +115,9 @@ def extract_entities_from_texts(
         "Kommun", "Omsorg", "Socialchef", "Black", "Friday", "Real", "Estate",
         "Tidningen", "Kuriren", "Wermlands", "Konsumentverket", "Ett", "Svidande",
         "Warfvinges", "Väg", "Industrial", "Solutions", "Slussen", "Construction",
+        # Titlar som inte ska bli personer
+        "Executive", "Vice", "President", "Sustainability", "Innovation", "Senior",
+        # UI-skräp
         "Sök", "Välj", "Segmentering", "Jämför", "Nätverkssökning", "Konkurser",
         "Topplistor", "Mer", "Sortering", "Relevans", "Bevaka", "Hitta",
         "Branschöversikt", "Produkter", "Logga", "Företag", "Hela", "Län"
