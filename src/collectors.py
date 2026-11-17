@@ -81,6 +81,10 @@ def extract_entities_from_texts(
         "Bokslut", "Nyckeltal", "Styrelse", "Befattningshavare", "Verksamhet",
         "Kommun", "Omsorg", "Socialchef", "Black", "Friday", "Real", "Estate",
         "Tidningen", "Kuriren", "Wermlands", "Konsumentverket", "Ett", "Svidande",
+        # UI-skräp från Allabolag
+        "Sök", "Välj", "Segmentering", "Jämför", "Nätverkssökning", "Konkurser",
+        "Topplistor", "Mer", "Sortering", "Relevans", "Bevaka", "Hitta",
+        "Branschöversikt", "Produkter", "Logga", "Företag", "Hela", "Län"
     }
 
     for part in re.sub(r"\b(AB|Aktiebolag)\b", "", company_name, flags=re.I).split():
@@ -95,7 +99,6 @@ def extract_entities_from_texts(
         r"\b(VD|verkställande direktör|koncernchef|styrelseordförande|ordförande|finanschef|CFO|CEO|valberedning|socialchef)\b",
         re.IGNORECASE,
     )
-    # Kräver att både för- och efternamn börjar med versal följt av minst 2 gemener (undviker t.ex. "Falu-")
     name_pattern = re.compile(
         r"\b([A-ZÅÄÖ][a-zåäöéü]{2,20}\s+[A-ZÅÄÖ][a-zåäöéü]{2,25})\b"
     )
@@ -114,17 +117,14 @@ def extract_entities_from_texts(
         published = item.get("published", "")
         url = item.get("url") or item.get("href", "")
 
-        # Rensa bort "- Tidningsnamn" i slutet av rubriken
         clean_title = re.sub(r"\s+-\s+[^-]+$", "", title).strip()
         raw_desc = item.get("description") or item.get("body", "")
 
-        # Undvik att skanna dubblett-description från Google News RSS som bara upprepar rubrik + källa
         if raw_desc and clean_title in raw_desc and len(raw_desc) <= len(title) + 10:
             text_to_scan = clean_title
         else:
             text_to_scan = f"{clean_title}. {raw_desc}".strip() if raw_desc else clean_title
 
-        # Lägg till källans ord i tillfälliga stoppord så t.ex. "Marcus Oscarsson" som sajt inte blir en person i bolaget
         source_words = set(re.findall(r"[A-ZÅÄÖ][a-zåäöéü]+", source))
 
         for org_match in org_nr_pattern.findall(text_to_scan):
@@ -266,7 +266,6 @@ async def fetch_google_news(
 async def fetch_wikidata_company(
     session: aiohttp.ClientSession, company_name: str
 ) -> Dict[str, Any]:
-    """Hämtar verifierad strukturdata från Wikidata API (fungerar alltid från moln-IP)."""
     clean_name = re.sub(r"\b(AB|Aktiebolag)\b", "", company_name, flags=re.I).strip()
     search_url = (
         "https://www.wikidata.org/w/api.php"
@@ -293,7 +292,6 @@ async def fetch_wikidata_company(
                     edata = await eresp.json()
                     claims = edata.get("entities", {}).get(entity_id, {}).get("claims", {})
 
-                    # P856 = officiell webbplats, P1454 = bolagsform, P159 = huvudkontor, P169 = VD, P1128 = anställda
                     if "P856" in claims:
                         raw_url = claims["P856"][0]["mainsnak"]["datavalue"]["value"]
                         info["official_website"] = raw_url
@@ -309,7 +307,6 @@ async def fetch_wikidata_company(
 async def fetch_allabolag_direct(
     session: aiohttp.ClientSession, company_name: str
 ) -> List[Dict[str, Any]]:
-    """Direktsökning mot Allabolag via HTTP istället för DuckDuckGo."""
     encoded = urllib.parse.quote(company_name)
     url = f"https://www.allabolag.se/what/{encoded}"
     results = []
@@ -320,7 +317,6 @@ async def fetch_allabolag_direct(
                 soup = BeautifulSoup(html, "html.parser")
                 text = soup.get_text(" ", strip=True)
 
-                # Plocka ut organisationsnummer och nyckelrader från träfflistan
                 org_matches = re.findall(r"\b(55\d{4}-\d{4})\b", text)
                 if org_matches:
                     results.append({
@@ -362,7 +358,6 @@ async def fetch_company_business_data(
 async def fetch_public_diaries_and_properties(
     session: aiohttp.ClientSession, target_name: str, city: str = "", org_nr: str = ""
 ) -> dict:
-    """Söker offentliga ärenden/tillsyn via Google News RSS med riktade myndighetsord."""
     id_part = f' OR "{org_nr}"' if org_nr else ""
     city_part = f" {city}" if city else ""
     query = f'("{target_name}"{id_part}){city_part} (diarium OR beslut OR tillsyn OR Konsumentverket OR IVO OR fastighet)'
@@ -381,7 +376,6 @@ async def fetch_person_socials_and_connections(
     discovered_people: List[str],
     city: str = "",
 ) -> dict:
-    """Söker lednings- och personkopplingar via riktade nyhets- och pressmeddelandeflöden."""
     query = f'"{company_name}" (VD OR styrelseordförande OR koncernchef OR grundare)'
     exec_news = await fetch_google_news(session, query, city=city, max_items=8)
 
@@ -412,7 +406,6 @@ async def collect_all_data(target: str, city: str = "") -> dict:
     }
 
     async with aiohttp.ClientSession(headers=BROWSER_HEADERS) as session:
-        # STEG 1: Hämta företagsdata & allmänna nyheter för identitetsupplösning
         company_data, news_data = await asyncio.gather(
             fetch_company_business_data(session, target),
             fetch_google_news(session, target, city=city, max_items=12),
@@ -421,7 +414,6 @@ async def collect_all_data(target: str, city: str = "") -> dict:
         combined_texts = company_data.get("results", []) + news_data.get("articles", [])
         parsed_entities = extract_entities_from_texts(combined_texts, company_name=target)
 
-        # Plocka org.nr från antingen direktsökning eller textparser
         direct_orgs = []
         for r in company_data.get("results", []):
             direct_orgs.extend(r.get("matched_org_numbers", []))
@@ -429,7 +421,6 @@ async def collect_all_data(target: str, city: str = "") -> dict:
         parsed_entities["org_numbers"] = all_orgs
         org_nr = all_orgs[0] if all_orgs else ""
 
-        # Hämta verifierad domän från Wikidata om den finns, annars fallback
         wikidata_site = company_data.get("wikidata", {}).get("official_website", "")
         if wikidata_site:
             resolved_domain = urllib.parse.urlparse(wikidata_site).netloc.lower().removeprefix("www.")
@@ -444,7 +435,6 @@ async def collect_all_data(target: str, city: str = "") -> dict:
             "discovered_people": discovered_names,
         }
 
-        # STEG 2: Kör övriga moduler parallellt
         tasks = [
             fetch_crt_sh(session, resolved_domain),
             fetch_public_diaries_and_properties(session, target, city=city, org_nr=org_nr),
