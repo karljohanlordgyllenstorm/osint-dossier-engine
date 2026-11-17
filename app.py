@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 import os
 import gradio as gr
@@ -17,15 +18,13 @@ def run_osint_pipeline(target: str, city: str):
   target = target.strip()
   city = city.strip()
 
-  # 1. Insamling av data med strikt filtrering
   gathered_data = asyncio_run(collect_all_data(target, city))
-
-  # 2. Generera visuell relationskarta
   graph_path = build_entity_graph(gathered_data, output_path="entity_graph.png")
 
-  # 3. Simulera/Bygg risk- och AI-analys för rapporten
   risk_assessment = {
-      "severity": "MODERAT" if len(gathered_data.get("findings", [])) > 5 else "LÅG",
+      "severity": (
+          "MODERAT" if len(gathered_data.get("findings", [])) > 5 else "LÅG"
+      ),
       "total_score": 42,
       "findings_breakdown": [
           {
@@ -58,7 +57,6 @@ def run_osint_pipeline(target: str, city: str):
       ],
   }
 
-  # 4. Generera formell PDF-dossier
   pdf_filename = f"dossier_{target.replace('.', '_')}.pdf"
   pdf_path = generate_pdf_dossier(
       gathered_data, risk_assessment, ai_response, graph_path, pdf_filename
@@ -74,10 +72,6 @@ def run_osint_pipeline(target: str, city: str):
   return summary_markdown, graph_path, pdf_path
 
 
-# Hjälpfunktion för att köra async i Gradio
-import asyncio
-
-
 def asyncio_run(coro):
   loop = asyncio.new_event_loop()
   asyncio.set_event_loop(loop)
@@ -87,8 +81,7 @@ def asyncio_run(coro):
     loop.close()
 
 
-# Modern Gradio UI med professionell design
-with gr.Blocks(theme=gr.themes.Soft(), title="OSINT Legal Dossier Engine") as demo:
+with gr.Blocks(title="OSINT Legal Dossier Engine") as demo:
   gr.Markdown("""
     # 🛡️ OSINT & ASM Legal Dossier Platform
     *Professionell plattform för verifierbar företags-, person- och infrastrukturintelligens.*
@@ -123,4 +116,9 @@ with gr.Blocks(theme=gr.themes.Soft(), title="OSINT Legal Dossier Engine") as de
   )
 
 if __name__ == "__main__":
-  demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
+  demo.launch(
+      server_name="0.0.0.0",
+      server_port=7860,
+      share=False,
+      theme=gr.themes.Soft(),
+  )
