@@ -499,10 +499,10 @@ async def fetch_bolagsverket_data(
     }
 
 
-async def fetch_public_diaries_and_properties(
+def fetch_public_diaries_and_properties(
     target_name: str, city: str = ""
 ) -> dict:
-  """Sök i allmänna diarier, myndighetsbeslut och fastighetsregister."""
+  """Sök i allmänna diarier, myndighetsbeslut och fastighetsregister (Synkron för run_in_executor)."""
   try:
     time.sleep(0.8)
     with DDGS() as ddgs:
@@ -540,10 +540,10 @@ async def fetch_public_diaries_and_properties(
     }
 
 
-async def fetch_person_socials_and_connections(
-    session: aiohttp.ClientSession, name: str, city: str = ""
-) -> dict:
+def fetch_person_socials_and_connections(name: str, city: str = "") -> dict:
+  """Sök efter personers publika profiler och nätverk (Synkron för run_in_executor)."""
   try:
+    time.sleep(0.8)
     with DDGS() as ddgs:
       city_query = f'"{city}"' if city else ""
       queries = [
@@ -662,7 +662,9 @@ async def collect_all_data(target: str, city: str = "") -> dict:
     else:
       person_val = info["value"]
       tasks.append(
-          fetch_person_socials_and_connections(session, person_val, city)
+          loop.run_in_executor(
+              None, fetch_person_socials_and_connections, person_val, city
+          )
       )
       tasks.append(
           loop.run_in_executor(
