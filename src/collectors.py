@@ -153,9 +153,9 @@ async def fetch_company_business_data(
     time.sleep(0.8)
     with DDGS() as ddgs:
       queries = [
-          f'"{company_name}" alla bolag OR proff OR allabolag.se',
-          f'"{company_name}" bokslut omsättning resultat styrelse VD dotterbolag',
-          f'"{company_name}" organisationsnummer ägare',
+          f"{company_name} årsredovisning omsättning resultat",
+          f"{company_name} organisationsnummer styrelse VD",
+          f"site:allabolag.se {company_name}",
       ]
       results = []
       seen_urls = set()
@@ -163,7 +163,7 @@ async def fetch_company_business_data(
         time.sleep(0.8)
         res = list(
             ddgs.text(
-                q, region="se-se", safesearch="moderate", max_results=8
+                q, region="se-se", safesearch="moderate", max_results=6
             )
         )
         for r in res:
@@ -225,9 +225,9 @@ def fetch_person_socials_and_connections(name: str, city: str = "") -> dict:
     with DDGS() as ddgs:
       city_query = f'"{city}"' if city else ""
       queries = [
-          f'"{name}" {city_query} site:linkedin.com/in/ OR site:linkedin.com/company/',
-          f'"{name}" {city_query} site:instagram.com OR site:x.com OR site:facebook.com',
-          f'"{name}" {city_query} styrelse VD grundare befattning medarbetare',
+          f'"{name}" VD OR styrelseordförande OR koncernchef',
+          f'"{name}" {city_query} site:linkedin.com/company/ OR site:linkedin.com/in/',
+          f'"{name}" ledning styrelse medarbetare',
       ]
       all_results = []
       seen_urls = set()
@@ -247,7 +247,7 @@ def fetch_person_socials_and_connections(name: str, city: str = "") -> dict:
           "source": "person_osint",
           "target_name": name,
           "city": city,
-          "results": all_results[:18],
+          "results": all_results[:15],
       }
   except Exception as e:
     return {"source": "person_osint", "error": str(e), "results": []}
