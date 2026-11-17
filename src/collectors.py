@@ -28,7 +28,7 @@ def classify_target(target: str) -> dict:
 
 
 def is_relevant_hit(result: dict, target: str, city: str = "") -> bool:
-  """Filtrerar bort skräpresultat genom att kräva att målets namn/ord finns i titel eller beskrivning."""
+  """Filtrerar bort skräpresultat och lexikon/uppslagsverk."""
   href = result.get("href", "").lower()
   spam_domains = [
       "answers.com",
@@ -43,6 +43,13 @@ def is_relevant_hit(result: dict, target: str, city: str = "") -> bool:
       "zoo.org",
       "microsoft.com",
       "gasstations-nearme.com",
+      "en.wikipedia.org",
+      "britannica.com",
+      "merriam-webster.com",
+      "whatis.com",
+      "webopedia.com",
+      "1000logos.net",
+      "symbolsymbol.com",
   ]
   if any(sd in href for sd in spam_domains):
     return False
@@ -415,3 +422,203 @@ def search_ddg(
               query,
               region="se-se",
               safesearch="moderate",
+              max_results=max_results,
+          )
+      )
+      results = []
+      for r in raw:
+        href = r.get("href", "").lower()
+        if required_domain and required_domain.lower() not in href:
+          continue
+        if filter_target and not is_relevant_hit(r, filter_target, city):
+          continue
+        results.append(r)
+
+      return {"source": "ddg_search", "query": query, "results": results}
+  except Exception as e:
+    return {"source": "ddg_search", "error": str(e), "results": []}
+
+
+async def fetch_company_business_data(
+    session: aiohttp.ClientSession, company_name: str
+) -> dict:
+  """Hämtar bokslut, omsättning, styrelsekopplingar och ägarstruktur från publika bolagsregister."""
+  try:
+    with DDGS() as ddgs:
+      queries = [
+          f'"{company_name}" site:allabolag.se OR site:proff.se OR site:bolagsfakta.se',
+          f'"{company_name}" bokslut omsättning resultat styrelse VD',
+      ]
+      results = []
+      seen_urls = set()
+      for q in queries:
+        time.sleep(0.8)
+        res = list(
+            ddgs.text(
+                q, region="se-se", safesearch="moderate", max_results=6
+            )
+        )
+        for r in res:
+          href = r.get("href", "")
+          if href not in seen_urls and is_relevant_hit(r, company_name):
+            seen_urls.add(href)
+            results.append(r)
+      return {
+          "source": "company_intelligence",
+          "query": company_name,
+          "results": results,
+      }
+  except Exception as e:
+    return {"source": "company_intelligence", "error": str(e), "results": []}
+
+
+async def fetch_person_socials_and_connections(
+    session: aiohttp.ClientSession, name: str, city: str = ""
+) -> dict:
+  """Hämtar yrkesprofiler, bolagskopplingar och publika inlägg med strikt namnfiltrering."""
+  try:
+    with DDGS() as ddgs:
+      city_query = f'"{city}"' if city else ""
+      queries = [
+          f'"{name}" {city_query} site:linkedin.com/in/',
+          f'"{name}" {city_query} site:allabolag.se OR site:proff.se OR site:ratsit.se',
+          f'"{name}" {city_query} styrelse OR VD OR grundare OR befattning',
+          f'"{name}" {city_query} site:github.com OR site:x.com OR site:twitter.com',
+      ]
+
+      all_results = []
+      seen_urls = set()
+      for q in queries:
+        time.sleep(0.8)
+        res = list(
+            ddgs.text(
+                q, region="se-se", safesearch="moderate", max_results=5
+            )
+        )
+        for r in res:
+          href = r.get("href", "")
+          if href not in seen_urls and is_relevant_hit(r, name, city):
+            seen_urls.add(href)
+            all_results.append(r)
+
+      return {
+          "source": "person_osint",
+          "target_name": name,
+          "city": city,
+          "results": all_results[:18],
+      }
+  except Exception as e:
+    return {"source": "person_osint", "error": str(e), "results": []}
+
+
+async def collect_all_data(target: str, city: str = "") -> dict:
+  info = classify_target(target)
+  loop = asyncio.get_event_loop()
+  results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+  async with aiohttp.ClientSession(
+      headers={"User-Agent": "OSINT-Dossier-Engine/1.5"}
+  ) as session:
+    tasks = []
+
+    if info["type"] == "domain":
+      domain = info["value"]
+      base_name = domain.split(".")[0]
+      tasks.append(fetch_crt_sh(session, domain))
+      tasks.append(fetch_hackertarget_subs(session, domain))
+      tasks.append(fetch_http_security_and_tech(session, domain))
+      tasks.append(fetch_public_contacts_and_socials(session, domain))
+      tasks.append(fetch_well_known_files(session, domain))
+      tasks.append(fetch_urlhaus(session, domain))
+      tasks.append(fetch_wayback(session, domain))
+      tasks.append(fetch_google_news(session, base_name))
+      tasks.append(fetch_company_business_data(session, base_name))
+      tasks.append(loop.run_in_executor(None, get_dns_records, domain))
+      tasks.append(loop.run_in_executor(None, get_whois_info, domain))
+      tasks.append(loop.run_in_executor(None, get_ssl_info, domain))
+      tasks.append(
+          loop.run_in_executor(None, search_youtube_presence, base_name, "", 5)
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None, search_ddg, f"site:{domain}", "", "", 10, domain
+          )
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None,
+              search_ddg,
+              f"site:{domain} filetype:pdf OR filetype:xlsx OR filetype:docx",
+              "",
+              "",
+              8,
+              domain,
+          )
+      )
+      # Fixad e-postsökning som undviker Wikipedia-fällan med @-tecken
+      tasks.append(
+          loop.run_in_executor(
+              None,
+              search_ddg,
+              f'site:{domain} contact OR e-post OR email',
+              "",
+              "",
+              6,
+              domain,
+          )
+      )
+
+      try:
+        ip = socket.gethostbyname(domain)
+        results["resolved_ip"] = ip
+        tasks.append(fetch_internetdb(session, ip))
+        tasks.append(fetch_ip_geo_and_asn(session, ip))
+      except socket.gaierror:
+        results["resolved_ip"] = None
+
+    elif info["type"] == "ip":
+      ip = info["value"]
+      tasks.append(fetch_internetdb(session, ip))
+      tasks.append(fetch_ip_geo_and_asn(session, ip))
+      tasks.append(fetch_urlhaus(session, ip))
+      tasks.append(
+          loop.run_in_executor(None, search_ddg, f'"{ip}"', "", "", 10, "")
+      )
+
+    elif info["type"] == "organization":
+      org_val = info["value"]
+      tasks.append(fetch_company_business_data(session, org_val))
+      tasks.append(fetch_google_news(session, org_val, city))
+      tasks.append(
+          loop.run_in_executor(
+              None, search_youtube_presence, org_val, city, 6
+          )
+      )
+      tasks.append(
+          loop.run_in_executor(
+              None,
+              search_ddg,
+              f'"{org_val}" site:linkedin.com/company/',
+              org_val,
+              "",
+              6,
+              "linkedin.com",
+          )
+      )
+
+    else:  # person
+      person_val = info["value"]
+      tasks.append(
+          fetch_person_socials_and_connections(session, person_val, city)
+      )
+      tasks.append(fetch_google_news(session, person_val, city))
+      tasks.append(
+          loop.run_in_executor(
+              None, search_youtube_presence, person_val, city, 6
+          )
+      )
+
+    gathered = await asyncio.gather(*tasks)
+    results["findings"] = gathered
+
+  return results
