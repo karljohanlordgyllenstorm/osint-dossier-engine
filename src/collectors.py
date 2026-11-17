@@ -1,9 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
 import re
-import socket
-import ssl
-import time
 from typing import Any, Dict, List
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -12,6 +9,9 @@ from bs4 import BeautifulSoup
 import dns.resolver
 from duckduckgo_search import DDGS
 import whois
+
+# Gemensam semafor för att förhindra att DDGS blockerar pga för många samtidiga anrop
+DDGS_SEMAPHORE = asyncio.Semaphore(1)
 
 
 def normalize_target_name(target: str) -> str:
@@ -50,18 +50,43 @@ def get_correct_domain(target: str) -> str:
   for key, domain in mapping.items():
     if key in t:
       return domain
-  clean = (
-      t.replace("ab", "").replace("publ", "").replace(".", "").replace(" ", "")
-  )
+
+  # Ta bort bolagsformer och översätt svenska tecken till ASCII
+  clean = re.sub(r"\b(ab|publ|aktiebolag)\b", "", t)
+  clean = clean.translate(str.maketrans("åäöéü", "aaoeu"))
+  clean = re.sub(r"[^a-z0-9-]", "", clean)
   return f"{clean}.se"
 
 
-def extract_entities_from_news(
-    articles: List[Dict[str, Any]], company_name: str = ""
+async def safe_ddgs_text(query: str, max_results: int = 6) -> List[Dict[str, Any]]:
+  """Kör DDGS-sökningar sekventiellt med fördröjning för att undvika tyst rate-limiting."""
+  async with DDGS_SEMAPHORE:
+    await asyncio.sleep(2.2)
+    loop = asyncio.get_running_loop()
+
+    def _search():
+      with DDGS() as ddgs:
+        return list(
+            ddgs.text(
+                query,
+                region="se-se",
+                safesearch="moderate",
+                max_results=max_results,
+            )
+        )
+
+    try:
+      return await loop.run_in_executor(None, _search)
+    except Exception:
+      return []
+
+
+def extract_entities_from_texts(
+    items: List[Dict[str, Any]], company_name: str = ""
 ) -> Dict[str, Any]:
   """
-    Parsar titlar och eventuella sammanfattningar från insamlade nyhetsartiklar
-    för att extrahera nyckelpersoner, rollreferenser (VD/ledning) och belopp/omsättning.
+    Parsar titlar och sammanfattningar från både nyheter och sökresultat
+    för att extrahera organisationsnummer, nyckelpersoner, roller och belopp.
     """
   stopwords = {
       "Sverige",
@@ -116,25 +141,38 @@ def extract_entities_from_news(
       "Intäkterna",
       "Negativt",
       "Blufföretag",
+      "Allabolag",
+      "Merinfo",
+      "Ratsit",
+      "Bolagsverket",
+      "Uppgifter",
+      "Bokslut",
+      "Nyckeltal",
+      "Styrelse",
+      "Befattningshavare",
+      "Verksamhet",
+      "Kommun",
+      "Omsorg",
+      "Socialchef",
   }
 
-  for part in company_name.replace("AB", "").split():
-    stopwords.add(part.strip())
+  for part in re.sub(r"\b(AB|Aktiebolag)\b", "", company_name, flags=re.I).split():
+    stopwords.add(part.strip().capitalize())
 
+  org_nr_pattern = re.compile(r"\b(55\d{4}-\d{4}|212000-\d{4})\b")
   financial_pattern = re.compile(
-      r"((?:EUR|USD|SEK|kr)?\s*\d+(?:[.,]\d+)?\s*(?:miljoner|miljarder|mnkr|mdkr|msek|M|B)(?:\s*kronor)?)",
+      r"((?:EUR|USD|SEK|kr)?\s*\d+(?:[.,]\d+)?\s*(?:miljoner|miljarder|mnkr|mdkr|msek|tkr|M|B)(?:\s*kronor)?)",
       re.IGNORECASE,
   )
-
   role_pattern = re.compile(
-      r"\b(VD|verkställande direktör|koncernchef|styrelseordförande|ordförande|finanschef|CFO|CEO|valberedning|leder)\b",
+      r"\b(VD|verkställande direktör|koncernchef|styrelseordförande|ordförande|finanschef|CFO|CEO|valberedning|socialchef)\b",
       re.IGNORECASE,
   )
-
   name_pattern = re.compile(
       r"\b([A-ZÅÄÖ][a-zåäöéü-]{1,20}\s+[A-ZÅÄÖ][a-zåäöéü-]{1,25})\b"
   )
 
+  extracted_org_nrs = set()
   extracted_people = []
   extracted_roles = []
   extracted_financials = []
@@ -142,16 +180,19 @@ def extract_entities_from_news(
   seen_people = set()
   seen_financials = set()
 
-  for article in articles:
-    title = article.get("title", "")
-    description = article.get("description", "")
+  for item in items:
+    title = item.get("title", "")
+    description = item.get("description") or item.get("body", "")
     clean_title = re.sub(r"\s+-\s+[^-]+$", "", title).strip()
     text_to_scan = (
         f"{clean_title}. {description}".strip() if description else clean_title
     )
-    source = article.get("source", "")
-    published = article.get("published", "")
-    url = article.get("url", "")
+    source = item.get("source", "Webb")
+    published = item.get("published", "")
+    url = item.get("url") or item.get("href", "")
+
+    for org_match in org_nr_pattern.findall(text_to_scan):
+      extracted_org_nrs.add(org_match)
 
     for match in financial_pattern.findall(text_to_scan):
       val = match.strip()
@@ -190,10 +231,43 @@ def extract_entities_from_news(
           })
 
   return {
+      "org_numbers": sorted(list(extracted_org_nrs)),
       "people": extracted_people,
       "executive_references": extracted_roles,
       "financial_mentions": extracted_financials,
   }
+
+
+def detect_official_domain(
+    search_results: List[Dict[str, Any]], fallback_domain: str
+) -> str:
+  """Försöker hitta bolagets faktiska webbplats i sökresultaten innan WHOIS/DNS körs."""
+  ignored_hosts = {
+      "allabolag.se",
+      "ratsit.se",
+      "merinfo.se",
+      "hitta.se",
+      "eniro.se",
+      "proff.se",
+      "bolagsfakta.se",
+      "linkedin.com",
+      "facebook.com",
+      "wikipedia.org",
+      "hd.se",
+      "dagenssamhalle.se",
+      "dagensmedicin.se",
+      "duckduckgo.com",
+  }
+  for r in search_results:
+    href = r.get("href", "")
+    if not href:
+      continue
+    parsed = urllib.parse.urlparse(href)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host and not any(ig in host for ig in ignored_hosts):
+      if host.endswith((".se", ".com", ".nu", ".org")):
+        return host
+  return fallback_domain
 
 
 def get_dns_records(domain: str) -> dict:
@@ -204,7 +278,7 @@ def get_dns_records(domain: str) -> dict:
       records[rtype] = [r.to_text().strip('"') for r in answers]
     except Exception:
       records[rtype] = []
-  return {"source": "dns", "data": records}
+  return {"source": "dns", "domain": domain, "data": records}
 
 
 def get_whois_info(domain: str) -> dict:
@@ -212,6 +286,7 @@ def get_whois_info(domain: str) -> dict:
     w = whois.whois(domain)
     return {
         "source": "whois",
+        "domain": domain,
         "data": {
             "registrar": w.registrar,
             "creation_date": str(w.creation_date),
@@ -221,7 +296,7 @@ def get_whois_info(domain: str) -> dict:
         },
     }
   except Exception as e:
-    return {"source": "whois", "error": str(e), "data": {}}
+    return {"source": "whois", "domain": domain, "error": str(e), "data": {}}
 
 
 async def fetch_crt_sh(session: aiohttp.ClientSession, domain: str) -> dict:
@@ -236,10 +311,19 @@ async def fetch_crt_sh(session: aiohttp.ClientSession, domain: str) -> dict:
             name = name.strip().lower()
             if name and "*" not in name:
               subs.add(name)
-        return {"source": "crt.sh", "subdomains": sorted(list(subs))[:200]}
+        return {
+            "source": "crt.sh",
+            "domain": domain,
+            "subdomains": sorted(list(subs))[:200],
+        }
   except Exception as e:
-    return {"source": "crt.sh", "error": str(e), "subdomains": []}
-  return {"source": "crt.sh", "subdomains": []}
+    return {
+        "source": "crt.sh",
+        "domain": domain,
+        "error": str(e),
+        "subdomains": [],
+    }
+  return {"source": "crt.sh", "domain": domain, "subdomains": []}
 
 
 async def fetch_google_news(
@@ -276,212 +360,149 @@ async def fetch_google_news(
   except Exception:
     pass
 
-  if not articles:
-    try:
-      time.sleep(0.8)
-      with DDGS() as ddgs:
-        news_res = list(
-            ddgs.news(full_q, region="se-se", max_results=max_items)
-        )
-        for n in news_res:
-          articles.append({
-              "title": n.get("title", ""),
-              "description": n.get("body", ""),
-              "source": n.get("source", ""),
-              "published": n.get("date", ""),
-              "url": n.get("url", ""),
-          })
-    except Exception as e:
-      return {"source": "google_news", "error": str(e), "articles": []}
-
   return {"source": "google_news", "query": full_q, "articles": articles}
 
 
-async def fetch_company_business_data(
-    session: aiohttp.ClientSession, company_name: str
+async def fetch_company_business_data(company_name: str) -> dict:
+  queries = [
+      f'"{company_name}" site:allabolag.se OR site:merinfo.se OR site:ratsit.se',
+      f'"{company_name}" organisationsnummer styrelse VD omsättning',
+      f'"{company_name}" hemsida kontakt',
+  ]
+  results = []
+  seen_urls = set()
+
+  for q in queries:
+    res = await safe_ddgs_text(q, max_results=6)
+    for r in res:
+      href = r.get("href", "")
+      if href and href not in seen_urls:
+        seen_urls.add(href)
+        results.append(r)
+
+  return {
+      "source": "company_intelligence",
+      "query": company_name,
+      "results": results,
+  }
+
+
+async def fetch_public_diaries_and_properties(
+    target_name: str, city: str = "", org_nr: str = ""
 ) -> dict:
-  try:
-    time.sleep(0.8)
-    with DDGS() as ddgs:
-      queries = [
-          f"{company_name} årsredovisning omsättning resultat",
-          f"{company_name} organisationsnummer styrelse VD",
-          f"site:allabolag.se {company_name}",
-      ]
-      results = []
-      seen_urls = set()
-      for q in queries:
-        time.sleep(0.8)
-        res = list(
-            ddgs.text(
-                q, region="se-se", safesearch="moderate", max_results=6
-            )
-        )
-        for r in res:
-          href = r.get("href", "")
-          if href not in seen_urls:
-            seen_urls.add(href)
-            results.append(r)
-      return {
-          "source": "company_intelligence",
-          "query": company_name,
-          "results": results,
-      }
-  except Exception as e:
-    return {"source": "company_intelligence", "error": str(e), "results": []}
+  city_q = f'"{city}"' if city else ""
+  id_q = f'OR "{org_nr}"' if org_nr else ""
+  queries = [
+      f'"{target_name}" {id_q} {city_q} diarium OR beslut OR tillsyn OR IVO',
+      f'"{target_name}" {city_q} fastighet OR lagfart OR upphandling',
+  ]
+  results = []
+  seen = set()
+
+  for q in queries:
+    res = await safe_ddgs_text(q, max_results=6)
+    for r in res:
+      href = r.get("href", "")
+      if href and href not in seen:
+        seen.add(href)
+        results.append(r)
+
+  return {
+      "source": "public_diaries_properties",
+      "query": target_name,
+      "city": city,
+      "results": results[:12],
+  }
 
 
-def fetch_public_diaries_and_properties(
-    target_name: str, city: str = ""
+async def fetch_person_socials_and_connections(
+    company_name: str, discovered_people: List[str], city: str = ""
 ) -> dict:
-  try:
-    time.sleep(0.8)
-    with DDGS() as ddgs:
-      city_q = f'"{city}"' if city else ""
-      queries = [
-          f'"{target_name}" {city_q} diarium OR beslut OR ärende filetype:pdf',
-          f'"{target_name}" {city_q} fastighet OR lagfart OR tomträtt',
-      ]
-      results = []
-      seen = set()
-      for q in queries:
-        time.sleep(0.8)
-        res = list(
-            ddgs.text(
-                q, region="se-se", safesearch="moderate", max_results=6
-            )
-        )
-        for r in res:
-          href = r.get("href", "")
-          if href not in seen:
-            seen.add(href)
-            results.append(r)
-      return {
-          "source": "public_diaries_properties",
-          "query": target_name,
-          "city": city,
-          "results": results[:12],
-      }
-  except Exception as e:
-    return {
-        "source": "public_diaries_properties",
-        "error": str(e),
-        "results": [],
-    }
+  city_query = f'"{city}"' if city else ""
+  queries = [
+      f'"{company_name}" VD OR styrelseordförande OR styrelseledamot',
+      f'"{company_name}" {city_query} site:linkedin.com/company/ OR site:linkedin.com/in/',
+  ]
 
+  # Lägg till riktade sökningar på faktiska personer som hittats i Steg 1
+  for person in discovered_people[:3]:
+    queries.append(f'"{person}" "{company_name}" OR {city_query}'.strip())
 
-def fetch_person_socials_and_connections(name: str, city: str = "") -> dict:
-  try:
-    time.sleep(0.8)
-    with DDGS() as ddgs:
-      city_query = f'"{city}"' if city else ""
-      queries = [
-          f'"{name}" VD OR styrelseordförande OR koncernchef',
-          f'"{name}" {city_query} site:linkedin.com/company/ OR site:linkedin.com/in/',
-          f'"{name}" ledning styrelse medarbetare',
-      ]
-      all_results = []
-      seen_urls = set()
-      for q in queries:
-        time.sleep(0.8)
-        res = list(
-            ddgs.text(
-                q, region="se-se", safesearch="moderate", max_results=6
-            )
-        )
-        for r in res:
-          href = r.get("href", "")
-          if href not in seen_urls:
-            seen_urls.add(href)
-            all_results.append(r)
-      return {
-          "source": "person_osint",
-          "target_name": name,
-          "city": city,
-          "results": all_results[:15],
-      }
-  except Exception as e:
-    return {"source": "person_osint", "error": str(e), "results": []}
+  all_results = []
+  seen_urls = set()
+
+  for q in queries:
+    res = await safe_ddgs_text(q, max_results=5)
+    for r in res:
+      href = r.get("href", "")
+      if href and href not in seen_urls:
+        seen_urls.add(href)
+        all_results.append(r)
+
+  return {
+      "source": "person_osint",
+      "target_company": company_name,
+      "queried_people": discovered_people[:3],
+      "city": city,
+      "results": all_results[:15],
+  }
 
 
 async def collect_all_data(target: str, city: str = "") -> dict:
   target = normalize_target_name(target)
   info = classify_target(target)
-  loop = asyncio.get_event_loop()
-  results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
-  clean_domain = get_correct_domain(target)
+
+  # Försök extrahera stad automatiskt ur bolagsnamnet om city inte angivits
+  if not city and info["type"] == "organization":
+    first_word = target.split()[0]
+    if first_word.lower() not in {"ab", "svenska", "nordiska", "nya"}:
+      city = first_word
+
+  loop = asyncio.get_running_loop()
+  results = {
+      "target": info,
+      "inferred_city": city,
+      "timestamp": datetime.now(timezone.utc).isoformat(),
+  }
 
   async with aiohttp.ClientSession(
-      headers={"User-Agent": "OSINT-Legal-Engine/2.5"}
+      headers={"User-Agent": "OSINT-Legal-Engine/2.6"}
   ) as session:
-    tasks = [
-        fetch_company_business_data(session, target),
+    # STEG 1: Hämta grundläggande företagsdata & nyheter först för identitetsupplösning
+    company_data, news_data = await asyncio.gather(
+        fetch_company_business_data(target),
         fetch_google_news(session, target, city, max_items=12),
-        fetch_crt_sh(session, clean_domain),
-        loop.run_in_executor(
-            None, fetch_public_diaries_and_properties, target, city
-        ),
-        loop.run_in_executor(
-            None, fetch_person_socials_and_connections, target, city
-        ),
-        loop.run_in_executor(None, get_dns_records, clean_domain),
-        loop.run_in_executor(None, get_whois_info, clean_domain),
-    ]
-
-    gathered = await asyncio.gather(*tasks, return_exceptions=True)
-    clean_gathered = [
-        g if not isinstance(g, Exception) else {"source": "error", "error": str(g)}
-        for g in gathered
-    ]
-
-    # Hämta insamlade nyhetsartiklar och parsa entiteter
-    news_articles = []
-    for item in clean_gathered:
-      if item.get("source") == "google_news":
-        news_articles = item.get("articles", [])
-        break
-
-    parsed_entities = extract_entities_from_news(
-        news_articles, company_name=target
     )
 
-    # Berika company_intelligence och person_osint med extraherade träffar från nyhetsflödet
-    for item in clean_gathered:
-      src = item.get("source")
-      if src == "company_intelligence":
-        item["parsed_financial_mentions"] = parsed_entities[
-            "financial_mentions"
-        ]
-        for fin in parsed_entities["financial_mentions"]:
-          item["results"].append({
-              "title": f"Finansiell uppgift ({fin['amount']}): {fin['context']}",
-              "href": fin["url"],
-              "body": f"Källa: {fin['source']} ({fin['published']})",
-          })
-      elif src == "person_osint":
-        item["parsed_people"] = parsed_entities["people"]
-        item["parsed_executive_references"] = parsed_entities[
-            "executive_references"
-        ]
-        for person in parsed_entities["people"]:
-          item["results"].append({
-              "title": f"Omnämnd person: {person['name']}",
-              "href": person["url"],
-              "body": f"{person['context']} — {person['source']} ({person['published']})",
-          })
-        for role in parsed_entities["executive_references"]:
-          roles_str = ", ".join(role["roles_mentioned"])
-          item["results"].append({
-              "title": f"Ledningsreferens ({roles_str}): {role['context']}",
-              "href": role["url"],
-              "body": f"Källa: {role['source']} ({role['published']})",
-          })
+    combined_texts = company_data.get("results", []) + news_data.get(
+        "articles", []
+    )
+    parsed_entities = extract_entities_from_texts(
+        combined_texts, company_name=target
+    )
 
-    clean_gathered.append({
-        "source": "news_entity_extraction",
-        "data": parsed_entities,
-    })
+    org_nr = (
+        parsed_entities["org_numbers"][0]
+        if parsed_entities["org_numbers"]
+        else ""
+    )
+    discovered_names = [p["name"] for p in parsed_entities["people"]]
+    fallback_domain = get_correct_domain(target)
+    resolved_domain = detect_official_domain(
+        company_data.get("results", []), fallback_domain
+    )
 
-    results["findings"] = clean_gathered
+    results["resolved_identifiers"] = {
+        "org_number": org_nr or None,
+        "domain": resolved_domain,
+        "discovered_people": discovered_names,
+    }
 
-  return results
+    # STEG 2: Kör övriga moduler med korrekta identifierare (domän, org.nr och personnamn)
+    tasks = [
+        fetch_crt_sh(session, resolved_domain),
+        fetch_public_diaries_and_properties(target, city, org_nr=org_nr),
+        fetch_person_socials_and_connections(
+            target, discovered_names, city=city
+        ),
+        loop
