@@ -63,6 +63,7 @@ def generate_pdf_dossier(
 
   news_html = ""
   company_person_html = ""
+  diaries_property_html = ""
   contacts_socials_html = ""
   youtube_html = ""
   raw_sections = ""
@@ -106,6 +107,20 @@ def generate_pdf_dossier(
         company_person_html += (
             f"<h3>Officiellt Register (API)</h3>"
             f"<div class='mono'><pre>{html.escape(json.dumps(reg_data, indent=2, ensure_ascii=False))}</pre></div>"
+        )
+
+    elif src == "public_diaries_properties":
+      res = f.get("results", [])
+      if res:
+        items = "".join(
+            f"<li><strong>{html.escape(r.get('title',''))}</strong><br>"
+            f"<span class='url-wrap'>{html.escape(r.get('href',''))}</span><br>"
+            f"<span style='color:#334155;'>{html.escape(r.get('body',''))}</span></li>"
+            for r in res
+        )
+        diaries_property_html += (
+            f"<h3>Allmänna Diarier, Beslut & Fastighetsregister</h3>"
+            f"<ul class='data-list'>{items}</ul>"
         )
 
     elif src == "public_contacts_socials":
@@ -172,6 +187,10 @@ def generate_pdf_dossier(
   if not company_person_html:
     company_person_html = (
         "<p style='color:#64748b;'>Inga bolagsdata eller registerkopplingar hittades.</p>"
+    )
+  if not diaries_property_html:
+    diaries_property_html = (
+        "<p style='color:#64748b;'>Inga publika diarier eller fastighetskopplingar hittades.</p>"
     )
   if not contacts_socials_html and not youtube_html:
     contacts_socials_html = (
@@ -354,14 +373,17 @@ def generate_pdf_dossier(
     <h2>2. Bolagsdata, Bokslut &amp; Officiella Register</h2>
     {company_person_html}
 
-    <h2>3. Verifierad Mediebevakning</h2>
+    <h2>3. Officiella Diarier, Beslut &amp; Fastighetsregister</h2>
+    {diaries_property_html}
+
+    <h2>4. Verifierad Mediebevakning</h2>
     {news_html}
 
-    <h2>4. Sociala Kanaler &amp; Publika Kontakter</h2>
+    <h2>5. Sociala Kanaler &amp; Publika Kontakter</h2>
     {contacts_socials_html}
     {youtube_html}
 
-    <h2>5. Exponerings- &amp; Riskanalys</h2>
+    <h2>6. Exponerings- &amp; Riskanalys</h2>
     <p>{html.escape(ai_res.get('technical_analysis', ''))}</p>
     <table class="data-table">
         <thead>
@@ -375,16 +397,16 @@ def generate_pdf_dossier(
         <tbody>{findings_rows}</tbody>
     </table>
 
-    <h2>6. Visuell Relationskarta (Entity Graph)</h2>
+    <h2>7. Visuell Relationskarta (Entity Graph)</h2>
     <div class="graph-box">
         <img src="data:image/png;base64,{graph_b64}" alt="Entity Graph" />
     </div>
 
-    <h2>7. Rekommendationer för Fortsatt Utredning</h2>
+    <h2>8. Rekommendationer för Fortsatt Utredning</h2>
     <ul>{rec_items}</ul>
 
     <div class="page-break"></div>
-    <h2>8. Teknisk Bilaga &amp; Evidenskedja (Raw Data Audit Trail)</h2>
+    <h2>9. Teknisk Bilaga &amp; Evidenskedja (Raw Data Audit Trail)</h2>
     <p style="color:#475569;">Denna bilaga innehåller rådata, subdomäner, säkerhetsrubriker samt kryptografisk verifiering för juridisk hälsa.</p>
     <div class="mono" style="margin-bottom: 12px;">
         <strong>Master SHA-256 Hash:</strong> {master_hash}
