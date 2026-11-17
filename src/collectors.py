@@ -177,7 +177,6 @@ async def fetch_http_security_and_tech(
 async def fetch_public_contacts_and_socials(
     session: aiohttp.ClientSession, domain: str
 ) -> dict:
-  """Extraherar publika e-postadresser och sociala kanaler från domänen."""
   url = f"https://{domain}"
   social_domains = [
       "linkedin.com",
@@ -193,7 +192,6 @@ async def fetch_public_contacts_and_socials(
       if resp.status == 200:
         html = await resp.text(errors="ignore")
         soup = BeautifulSoup(html, "html.parser")
-
         emails = set(
             re.findall(
                 r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", html
@@ -204,13 +202,11 @@ async def fetch_public_contacts_and_socials(
             for e in emails
             if not e.lower().endswith((".png", ".jpg", ".svg", ".webp", ".gif"))
         ]
-
         socials = set()
         for a in soup.find_all("a", href=True):
           href = a["href"].strip()
           if any(sd in href.lower() for sd in social_domains):
             socials.add(href)
-
         return {
             "source": "public_contacts_socials",
             "data": {
@@ -332,14 +328,12 @@ async def fetch_wayback(session: aiohttp.ClientSession, domain: str) -> dict:
 async def fetch_google_news(
     session: aiohttp.ClientSession, query: str, city: str = "", max_items: int = 8
 ) -> dict:
-  """Hämtar färska nyhetsartiklar från Google News RSS med fallback till DDG News."""
   full_q = f"{query} {city}".strip() if city else query.strip()
   encoded_q = urllib.parse.quote(full_q)
   url = f"https://news.google.com/rss/search?q={encoded_q}&hl=sv&gl=SE&ceid=SE:sv"
   headers = {
       "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
       )
   }
   articles = []
@@ -381,7 +375,6 @@ async def fetch_google_news(
 def search_youtube_presence(
     query: str, city: str = "", max_results: int = 6
 ) -> dict:
-  """Söker efter publika YouTube-videor med strikt domän- och relevanskontroll."""
   try:
     time.sleep(0.8)
     with DDGS() as ddgs:
@@ -413,7 +406,6 @@ def search_ddg(
     max_results: int = 8,
     required_domain: str = "",
 ) -> dict:
-  """Utför webbsökning i svensk region med strikt filtrering mot rate-limiting och skräp."""
   try:
     time.sleep(0.8)
     with DDGS() as ddgs:
@@ -433,7 +425,6 @@ def search_ddg(
         if filter_target and not is_relevant_hit(r, filter_target, city):
           continue
         results.append(r)
-
       return {"source": "ddg_search", "query": query, "results": results}
   except Exception as e:
     return {"source": "ddg_search", "error": str(e), "results": []}
@@ -442,7 +433,6 @@ def search_ddg(
 async def fetch_company_business_data(
     session: aiohttp.ClientSession, company_name: str
 ) -> dict:
-  """Hämtar bokslut, omsättning, styrelsekopplingar och ägarstruktur från publika bolagsregister."""
   try:
     with DDGS() as ddgs:
       queries = [
@@ -472,10 +462,46 @@ async def fetch_company_business_data(
     return {"source": "company_intelligence", "error": str(e), "results": []}
 
 
+async def fetch_bolagsverket_data(
+    session: aiohttp.ClientSession, company_name_or_orgnr: str
+) -> dict:
+  """Officiell registerintegration (t.ex. Bolagsverket / öppna data)."""
+  cleaned_query = company_name_or_orgnr.strip()
+  headers = {
+      "User-Agent": "OSINT-Legal-Engine/1.7",
+      "Accept": "application/json",
+  }
+  encoded_q = urllib.parse.quote(cleaned_query)
+  api_url = f"https://api.bolagsverket.se/sok/v1/foretag?q={encoded_q}"
+  try:
+    async with session.get(api_url, headers=headers, timeout=8) as resp:
+      if resp.status == 200:
+        data = await resp.json()
+        return {
+            "source": "official_registry",
+            "status": "success",
+            "queried_target": cleaned_query,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "registry_data": data,
+        }
+      else:
+        return {
+            "source": "official_registry",
+            "status": "error",
+            "code": resp.status,
+            "message": f"Register-API svarade med status {resp.status}",
+        }
+  except Exception as e:
+    return {
+        "source": "official_registry",
+        "status": "exception",
+        "error": str(e),
+    }
+
+
 async def fetch_person_socials_and_connections(
     session: aiohttp.ClientSession, name: str, city: str = ""
 ) -> dict:
-  """Hämtar yrkesprofiler, bolagskopplingar och publika inlägg med strikt namnfiltrering."""
   try:
     with DDGS() as ddgs:
       city_query = f'"{city}"' if city else ""
@@ -485,7 +511,6 @@ async def fetch_person_socials_and_connections(
           f'"{name}" {city_query} styrelse OR VD OR grundare OR befattning',
           f'"{name}" {city_query} site:github.com OR site:x.com OR site:twitter.com',
       ]
-
       all_results = []
       seen_urls = set()
       for q in queries:
@@ -500,7 +525,6 @@ async def fetch_person_socials_and_connections(
           if href not in seen_urls and is_relevant_hit(r, name, city):
             seen_urls.add(href)
             all_results.append(r)
-
       return {
           "source": "person_osint",
           "target_name": name,
@@ -517,7 +541,7 @@ async def collect_all_data(target: str, city: str = "") -> dict:
   results = {"target": info, "timestamp": datetime.now(timezone.utc).isoformat()}
 
   async with aiohttp.ClientSession(
-      headers={"User-Agent": "OSINT-Dossier-Engine/1.5"}
+      headers={"User-Agent": "OSINT-Dossier-Engine/1.7"}
   ) as session:
     tasks = []
 
@@ -555,12 +579,11 @@ async def collect_all_data(target: str, city: str = "") -> dict:
               domain,
           )
       )
-      # Fixad e-postsökning som undviker Wikipedia-fällan med @-tecken
       tasks.append(
           loop.run_in_executor(
               None,
               search_ddg,
-              f'site:{domain} contact OR e-post OR email',
+              f"site:{domain} contact OR e-post OR email",
               "",
               "",
               6,
@@ -588,6 +611,9 @@ async def collect_all_data(target: str, city: str = "") -> dict:
     elif info["type"] == "organization":
       org_val = info["value"]
       tasks.append(fetch_company_business_data(session, org_val))
+      tasks.append(
+          fetch_bolagsverket_data(session, org_val)
+      )  # <-- Integrerat officiellt register
       tasks.append(fetch_google_news(session, org_val, city))
       tasks.append(
           loop.run_in_executor(
@@ -606,7 +632,7 @@ async def collect_all_data(target: str, city: str = "") -> dict:
           )
       )
 
-    else:  # person
+    else:
       person_val = info["value"]
       tasks.append(
           fetch_person_socials_and_connections(session, person_val, city)
